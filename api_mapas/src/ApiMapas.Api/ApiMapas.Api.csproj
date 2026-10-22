@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <RootNamespace>ApiMapas.Api</RootNamespace>
+    <AssemblyName>ApiMapas.Api</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ApiMapas.Aplicacao\ApiMapas.Aplicacao.csproj" />
+    <ProjectReference Include="..\ApiMapas.Infraestrutura\ApiMapas.Infraestrutura.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ApiMapas.Tests" />
+  </ItemGroup>
+
+</Project>

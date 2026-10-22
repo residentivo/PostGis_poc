@@ -1,0 +1,24 @@
+# Build
+bin/
+obj/
+
+# Segredos (R6) - nunca versionar
+.env
+.env.*
+!.env.example
+
+# IDE / usuario
+*.user
+.vs/
+Properties/launchSettings.json
+
+# Testes e cobertura
+TestResults/
+coverage*
+*.coverage
+
+# Configuracoes por ambiente e material criptografico (F5)
+appsettings.*.json
+*.pfx
+*.key
+*.pem

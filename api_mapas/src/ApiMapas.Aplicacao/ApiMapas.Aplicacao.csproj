@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>ApiMapas.Aplicacao</RootNamespace>
+    <AssemblyName>ApiMapas.Aplicacao</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- RA-14: versao FIXA, sem curinga -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="[10.0.10]" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ApiMapas.Dominio\ApiMapas.Dominio.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ApiMapas.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>ApiMapas.Infraestrutura</RootNamespace>
+    <AssemblyName>ApiMapas.Infraestrutura</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- RA-14: versoes FIXAS, sem curinga -->
+    <PackageReference Include="Npgsql" Version="[10.0.3]" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="[10.0.10]" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ApiMapas.Dominio\ApiMapas.Dominio.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ApiMapas.Tests" />
+  </ItemGroup>
+
+</Project>

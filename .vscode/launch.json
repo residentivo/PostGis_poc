@@ -1,0 +1,143 @@
+{
+  // Credenciais NAO ficam neste arquivo (R1/R6/RQ-8): usuario e senha sao pedidos a cada execucao.
+  // PG_HOST, PG_PORT e PG_DATABASE usam os padroes do programa (192.168.168.106, 5432, casaos).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "TesteGraphy: exemplos fixos",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-teste-graphy",
+      "program": "${workspaceFolder}/teste_graphy/src/TesteGraphy/bin/Debug/net10.0/TesteGraphy.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/teste_graphy/src/TesteGraphy",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "env": {
+        "PG_USER": "${input:pgUser}",
+        "PG_PASSWORD": "${input:pgPassword}"
+      }
+    },
+    {
+      "name": "TesteGraphy: informar WKT",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-teste-graphy",
+      "program": "${workspaceFolder}/teste_graphy/src/TesteGraphy/bin/Debug/net10.0/TesteGraphy.dll",
+      "args": ["${input:wkt}"],
+      "cwd": "${workspaceFolder}/teste_graphy/src/TesteGraphy",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "env": {
+        "PG_USER": "${input:pgUser}",
+        "PG_PASSWORD": "${input:pgPassword}"
+      }
+    },
+    {
+      "name": "TesteMetry: exemplos fixos (escolher PG_SRID)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-teste-metry",
+      "program": "${workspaceFolder}/teste_metry/src/TesteMetry/bin/Debug/net10.0/TesteMetry.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/teste_metry/src/TesteMetry",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "env": {
+        "PG_USER": "${input:pgUser}",
+        "PG_PASSWORD": "${input:pgPassword}",
+        "PG_SRID": "${input:pgSrid}"
+      }
+    },
+    {
+      "name": "TesteMetry: informar WKT (escolher PG_SRID)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-teste-metry",
+      "program": "${workspaceFolder}/teste_metry/src/TesteMetry/bin/Debug/net10.0/TesteMetry.dll",
+      "args": ["${input:wktMetry}"],
+      "cwd": "${workspaceFolder}/teste_metry/src/TesteMetry",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "env": {
+        "PG_USER": "${input:pgUser}",
+        "PG_PASSWORD": "${input:pgPassword}",
+        "PG_SRID": "${input:pgSrid}"
+      }
+    },
+    {
+      // PG_SRID ausente: o programa usa o padrao 4326.
+      "name": "TesteMetry: exemplos fixos (PG_SRID ausente = 4326)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-teste-metry",
+      "program": "${workspaceFolder}/teste_metry/src/TesteMetry/bin/Debug/net10.0/TesteMetry.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/teste_metry/src/TesteMetry",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "env": {
+        "PG_USER": "${input:pgUser}",
+        "PG_PASSWORD": "${input:pgPassword}"
+      }
+    },
+    {
+      // API REST api_mapas em http://localhost:5080 (so loopback, RA-5). Use a role api_mapas_leitura, nunca casaos.
+      "name": "ApiMapas: API (http://localhost:5080)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-api-mapas",
+      "program": "${workspaceFolder}/api_mapas/src/ApiMapas.Api/bin/Debug/net10.0/ApiMapas.Api.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/api_mapas/src/ApiMapas.Api",
+      "console": "internalConsole",
+      "stopAtEntry": false,
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Production",
+        "ASPNETCORE_URLS": "http://localhost:5080",
+        "PG_USER": "${input:pgUser}",
+        "PG_PASSWORD": "${input:pgPassword}",
+        "PG_SSLMODE": "${input:pgSslMode}"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "pgUser",
+      "type": "promptString",
+      "description": "PG_USER (usuario do banco casaos)"
+    },
+    {
+      "id": "pgPassword",
+      "type": "promptString",
+      "description": "PG_PASSWORD",
+      "password": true
+    },
+    {
+      "id": "wkt",
+      "type": "promptString",
+      "description": "WKT a inserir em public.mapas.graphy (SRID 4326)",
+      "default": "POINT(-46.6333 -23.5505)"
+    },
+    {
+      "id": "pgSrid",
+      "type": "pickString",
+      "description": "PG_SRID (SRID aplicado ao WKT em public.mapas.metry)",
+      "options": ["4326", "4674", "3857", "31983"],
+      "default": "4326"
+    },
+    {
+      "id": "pgSslMode",
+      "type": "pickString",
+      "description": "PG_SSLMODE da API (Disable so com a excecao registrada em tarefas/afazer.md; o servidor hoje esta com ssl=off)",
+      "options": ["Require", "VerifyFull", "VerifyCA", "Disable"],
+      "default": "Require"
+    },
+    {
+      "id": "wktMetry",
+      "type": "promptString",
+      "description": "WKT a inserir em public.mapas.metry (coordenadas no SRID escolhido; graus so para 4326/4674, metros para 3857/31983)",
+      "default": ""
+    }
+  ]
+}

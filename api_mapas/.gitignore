@@ -1,0 +1,26 @@
+# RA-15 - nunca versionar segredos nem artefatos de build
+
+# Variaveis de ambiente locais (somente o exemplo com placeholders e versionado)
+.env
+.env.*
+!.env.example
+
+# Configuracoes por ambiente (podem receber valores locais); o appsettings.json base nao tem segredos
+appsettings.*.json
+
+# Certificados e chaves
+*.pfx
+*.pem
+*.key
+
+# Build e testes
+bin/
+obj/
+TestResults/
+coverage*/
+*.coverage
+*.coveragexml
+
+# IDE
+.vs/
+*.user
