@@ -1,0 +1,36 @@
+#cloud-config
+# infraestrutura/azure/cloud-init.yaml - primeira inicializacao da VM
+# (Ubuntu 24.04): Docker Engine + plugin compose, firewall e atualizacoes
+# automaticas de seguranca. Usado por azure/provisionar.sh (--custom-data).
+package_update: true
+package_upgrade: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - openssl
+  - unattended-upgrades
+  - ufw
+
+write_files:
+  # Logs dos containers com rotacao (senao enchem o disco).
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "20m", "max-file": "5" },
+        "live-restore": true
+      }
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker azureuser
+  - install -d -m 755 /opt/api_mapas
+  - chown azureuser:azureuser /opt/api_mapas
+  # Defesa em profundidade alem do NSG. Obs.: portas publicadas pelo Docker
+  # passam por fora do ufw; o NSG da Azure e quem filtra 80/443.
+  - ufw default deny incoming
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable

@@ -1,0 +1,151 @@
+// =====================================================================
+// infraestrutura/Jenkinsfile - CI/CD da api_mapas para a VM da Azure
+//
+// Job: Pipeline (ou Multibranch) com "Script Path" = infraestrutura/Jenkinsfile.
+// Agente: Linux com git, Docker Engine 23+ (BuildKit) e ssh/scp.
+// Plugins: Pipeline, Credentials Binding, SSH Agent, Timestamper.
+// Credenciais (azure/provisionar.sh mostra os valores):
+//   acr-credenciais  Username with password  service principal com AcrPush
+//   azure-vm-ssh     SSH Username with private key  azureuser da VM
+//
+// Estagios: Versao -> Testes (cobertura >= 80%) -> Imagens -> Publicar no
+// ACR -> Implantar (so na main) -> teste de fumaca (implantar.sh).
+// =====================================================================
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'ACR_NOME', defaultValue: 'acrpostgispoc', description: 'Nome do Azure Container Registry (sem .azurecr.io)')
+        string(name: 'VM_HOST', defaultValue: '', description: 'IP ou DNS publico da VM da Azure')
+        string(name: 'VM_USUARIO', defaultValue: 'azureuser', description: 'Usuario SSH da VM')
+        booleanParam(name: 'IMPLANTAR', defaultValue: true, description: 'Implantar na VM (so vale na branch main)')
+        string(name: 'COBERTURA_MINIMA', defaultValue: '0.80', description: 'Cobertura minima de linhas (0 a 1)')
+    }
+
+    environment {
+        REGISTRO = "${params.ACR_NOME}.azurecr.io"
+        DOCKER_BUILDKIT = '1'
+        COMPOSE_DIR = '/opt/api_mapas'
+    }
+
+    stages {
+        stage('Versao') {
+            steps {
+                script {
+                    def commit = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+                    env.API_TAG = "${env.BUILD_NUMBER}-${commit}"
+                    // Muda so quando o banco muda: a implantacao da API nao recria o postgis.
+                    def commitBanco = sh(script: 'git log -1 --format=%h -- database infraestrutura/postgis', returnStdout: true).trim()
+                    env.POSTGIS_TAG = "17-3.5-${commitBanco}"
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} api ${env.API_TAG}"
+                }
+                echo "api_mapas:${env.API_TAG} | postgis_mapas:${env.POSTGIS_TAG}"
+            }
+        }
+
+        stage('Testes') {
+            steps {
+                sh '''
+                    rm -rf resultados_testes
+                    docker build -f infraestrutura/api/Dockerfile --target resultados \
+                        --output type=local,dest=resultados_testes .
+                '''
+                sh '''
+                    arquivo=$(find resultados_testes -name coverage.cobertura.xml | head -n 1)
+                    [ -n "$arquivo" ] || { echo "coverage.cobertura.xml nao gerado"; exit 1; }
+                    taxa=$(grep -o -m 1 'line-rate="[0-9.]*"' "$arquivo" | head -n 1 | cut -d '"' -f 2)
+                    echo "Cobertura de linhas: $taxa (minimo $COBERTURA_MINIMA)"
+                    awk -v t="$taxa" -v m="$COBERTURA_MINIMA" 'BEGIN { exit (t + 0 < m + 0) ? 1 : 0 }' \
+                        || { echo "Cobertura abaixo do minimo"; exit 1; }
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'resultados_testes/**', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Imagens') {
+            steps {
+                sh '''
+                    docker build -f infraestrutura/api/Dockerfile --target final \
+                        --label org.opencontainers.image.revision="$GIT_COMMIT" \
+                        -t "$REGISTRO/api_mapas:$API_TAG" .
+                    docker build -f infraestrutura/postgis/Dockerfile \
+                        --label org.opencontainers.image.revision="$GIT_COMMIT" \
+                        -t "$REGISTRO/postgis_mapas:$POSTGIS_TAG" .
+                '''
+            }
+        }
+
+        stage('Publicar no ACR') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'acr-credenciais',
+                                                  usernameVariable: 'ACR_USUARIO',
+                                                  passwordVariable: 'ACR_SENHA')]) {
+                    sh '''
+                        echo "$ACR_SENHA" | docker login "$REGISTRO" -u "$ACR_USUARIO" --password-stdin
+                        docker push "$REGISTRO/api_mapas:$API_TAG"
+                        if docker manifest inspect "$REGISTRO/postgis_mapas:$POSTGIS_TAG" >/dev/null 2>&1; then
+                            echo "postgis_mapas:$POSTGIS_TAG ja existe no ACR; push pulado."
+                        else
+                            docker push "$REGISTRO/postgis_mapas:$POSTGIS_TAG"
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Implantar') {
+            when {
+                allOf {
+                    expression { params.IMPLANTAR }
+                    // Job simples (sem BRANCH_NAME) ou multibranch na main.
+                    expression { !env.BRANCH_NAME || env.BRANCH_NAME == 'main' }
+                }
+            }
+            steps {
+                script {
+                    if (!params.VM_HOST?.trim()) {
+                        error('Parametro VM_HOST vazio.')
+                    }
+                }
+                withCredentials([usernamePassword(credentialsId: 'acr-credenciais',
+                                                  usernameVariable: 'ACR_USUARIO',
+                                                  passwordVariable: 'ACR_SENHA')]) {
+                    sshagent(credentials: ['azure-vm-ssh']) {
+                        sh '''
+                            DESTINO="$VM_USUARIO@$VM_HOST"
+                            SSH_OPCOES="-o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+                            ssh $SSH_OPCOES "$DESTINO" "mkdir -p $COMPOSE_DIR/nginx"
+                            scp $SSH_OPCOES infraestrutura/docker-compose.yml infraestrutura/servidor/implantar.sh \
+                                "$DESTINO:$COMPOSE_DIR/"
+                            scp $SSH_OPCOES infraestrutura/nginx/api_mapas.conf "$DESTINO:$COMPOSE_DIR/nginx/"
+                            # Senha do ACR pela entrada padrao, nunca na linha de comando remota.
+                            echo "$ACR_SENHA" | ssh $SSH_OPCOES "$DESTINO" \
+                                "sudo bash $COMPOSE_DIR/implantar.sh '$REGISTRO' '$API_TAG' '$POSTGIS_TAG' '$ACR_USUARIO'"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'docker logout "$REGISTRO" >/dev/null 2>&1 || true'
+            sh '''
+                docker image rm "$REGISTRO/api_mapas:$API_TAG" >/dev/null 2>&1 || true
+                docker image prune -f >/dev/null 2>&1 || true
+            '''
+        }
+    }
+}

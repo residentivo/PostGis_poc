@@ -1,0 +1,12 @@
+# Contexto = raiz do repositorio; so entra o codigo da api_mapas (RA-15: sem .env nem appsettings.*.json).
+*
+!api_mapas/
+api_mapas/**/bin/
+api_mapas/**/obj/
+api_mapas/**/TestResults/
+api_mapas/**/.vs/
+api_mapas/**/*.user
+api_mapas/**/.env
+api_mapas/**/.env.*
+api_mapas/**/appsettings.*.json
+api_mapas/postman/

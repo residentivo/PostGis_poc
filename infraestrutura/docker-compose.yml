@@ -1,0 +1,102 @@
+# =====================================================================
+# infraestrutura/docker-compose.yml - pilha da api_mapas na VM da Azure
+#
+# Na VM fica em /opt/api_mapas (copiado pelo Jenkins), ao lado de:
+#   .env          REGISTRO, API_TAG, POSTGIS_TAG e limites (sem segredo; implantar.sh)
+#   segredos/     senhas, api.env e htpasswd (preparar_servidor.sh; nunca no Git)
+#   certs/        fullchain.pem e privkey.pem do nginx
+#   nginx/        api_mapas.conf
+#
+# Redes:
+#   publica  nginx (unico com portas publicadas: 80 e 443)
+#   interna  nginx/api <-> postgis, sem saida para a internet
+# A api usa o namespace de rede do nginx (network_mode), porque so ouve em
+# 127.0.0.1 (RA-5); por isso ela nao tem "ports" nem "networks" proprios.
+# =====================================================================
+name: api_mapas
+
+services:
+  postgis:
+    # POSTGIS_TAG so muda quando database/ ou infraestrutura/postgis/ mudam (Jenkinsfile),
+    # entao o banco nao e recriado a cada implantacao da API.
+    image: ${REGISTRO:?defina REGISTRO no .env}/postgis_mapas:${POSTGIS_TAG:?defina POSTGIS_TAG no .env}
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_senha_casaos
+    secrets:
+      - pg_senha_casaos
+      - pg_senha_leitura
+      - pg_senha_escrita
+    volumes:
+      - postgis_dados:/var/lib/postgresql/data
+    networks:
+      - interna
+    shm_size: 256mb
+    healthcheck:
+      # TCP: durante o initdb o servidor temporario so ouve no socket, entao
+      # o container so fica healthy depois que os scripts terminaram.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U casaos -d casaos"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/api_mapas.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - ./segredos/htpasswd:/etc/nginx/segredos/htpasswd:ro
+    networks:
+      - publica
+      - interna
+
+  api:
+    image: ${REGISTRO}/api_mapas:${API_TAG:?defina API_TAG no .env}
+    restart: unless-stopped
+    network_mode: "service:nginx"
+    depends_on:
+      postgis:
+        condition: service_healthy
+      nginx:
+        condition: service_started
+    # PG_USER/PG_PASSWORD e PG_ESCRITA_USER/PG_ESCRITA_PASSWORD (preparar_servidor.sh).
+    env_file:
+      - ./segredos/api.env
+    environment:
+      PG_HOST: postgis
+      PG_PORT: "5432"
+      PG_DATABASE: casaos
+      PG_SSLMODE: Require
+      Verboso: ${API_VERBOSO:-false}
+      # Atras do nginx a API ve todo mundo como 127.0.0.1: estes limites "por IP"
+      # valem para a API inteira. O limite por IP real fica no nginx.
+      ApiMapas__LimiteRequisicoesPorMinuto: ${API_LIMITE_REQUISICOES_POR_MINUTO:-60}
+      ApiMapas__LimiteEscritasPorMinuto: ${API_LIMITE_ESCRITAS_POR_MINUTO:-10}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  publica: {}
+  interna:
+    internal: true
+
+volumes:
+  postgis_dados: {}
+
+secrets:
+  pg_senha_casaos:
+    file: ./segredos/pg_senha_casaos
+  pg_senha_leitura:
+    file: ./segredos/pg_senha_leitura
+  pg_senha_escrita:
+    file: ./segredos/pg_senha_escrita

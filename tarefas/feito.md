@@ -1143,3 +1143,16 @@ Respostas (`application/problem+json`, mesmos `type`/`traceId`, nada ecoado do c
   - `teste_graphy/README.md` e `teste_metry/README.md`: nota S3 atualizada (PK `mapas_pkey` e `GENERATED ALWAYS` depois da migração, sem mudança de código, colunas `pk_exata`/`id_always` do `validacao.sql`).
   - `database/README.md`: conferido; já estava completo (migração, limpeza, roles revisão 5). Sem mudança.
   - Kanban: o plano do PO1-R foi movido para este arquivo como referência. Em `afazer.md` ficaram, deste pedido, só o PU-R e o PU-DBA. A ação 5 foi atualizada para "Escrita (PUT e POST)", depois da migração.
+
+## Pedido (2026-10-27): pasta `infraestrutura/` para publicação via Jenkins numa VM da Azure
+
+### I1 - Arquivos de infraestrutura (Docker, Jenkins, Azure)
+- Responsável: sessão principal (fora das camadas do time; não há agente de infraestrutura)
+- Concluído em: 2026-10-27 (arquivos entregues; build e pipeline ainda não executados, Docker parado na máquina de desenvolvimento)
+- O que foi gerado (detalhes em `infraestrutura/README.md`):
+  - `postgis/`: imagem PostgreSQL 17 + PostGIS 3.5 que aplica, na 1ª subida, `mapas.sql`, `migracao_mapas_pk.sql`, `validar_check_mapas.sql` e `roles.sql` (com SSL) sem alterá-los, define as senhas das roles da API a partir de secrets e instala um `pg_hba.conf` só `hostssl` + `scram-sha-256` para as roles da API.
+  - `api/`: Dockerfile .NET 10 (testes + cobertura, runtime sem privilégio, API em `127.0.0.1:5080`, RA-5 mantido).
+  - `nginx/`: proxy no mesmo namespace de rede da API, com TLS, autenticação básica e rate limit por IP real.
+  - `docker-compose.yml`, `servidor/preparar_servidor.sh`, `servidor/implantar.sh`, `azure/provisionar.sh`, `azure/cloud-init.yaml` e `Jenkinsfile` (gate de cobertura de 80%, push no ACR, implantação só na `main`).
+  - Escrita (PUT/POST) desligada por padrão na Azure por causa da U-1; liga com `HABILITAR_ESCRITA=1`.
+- Pendente: revisão do SecBrain da exposição da API por proxy (RA-5/U-1) antes de ligar a escrita; primeira execução real do pipeline.

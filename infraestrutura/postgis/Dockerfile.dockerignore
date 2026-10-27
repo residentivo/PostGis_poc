@@ -1,0 +1,8 @@
+# Contexto = raiz do repositorio; so entra o que o Dockerfile do PostGIS copia.
+*
+!database/mapas.sql
+!database/migracao_mapas_pk.sql
+!database/validar_check_mapas.sql
+!database/roles.sql
+!infraestrutura/postgis/pg_hba.conf
+!infraestrutura/postgis/initdb/
