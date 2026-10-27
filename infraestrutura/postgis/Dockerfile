@@ -13,9 +13,14 @@
 FROM postgis/postgis:17-3.5
 
 # openssl: gera o certificado autoassinado do servidor na primeira subida.
-RUN apt-get update \
+# Vem do Debian; o repositorio PGDG (bullseye-pgdg saiu de apt.postgresql.org
+# e responde 404) fica fora so durante esta instalacao e volta em seguida.
+RUN mkdir -p /tmp/pgdg \
+    && mv /etc/apt/sources.list.d/pgdg* /tmp/pgdg/ \
+    && apt-get update \
     && apt-get install -y --no-install-recommends openssl \
-    && rm -rf /var/lib/apt/lists/*
+    && mv /tmp/pgdg/* /etc/apt/sources.list.d/ \
+    && rm -rf /var/lib/apt/lists/* /tmp/pgdg
 
 # Fonte oficial do banco: database/. Os scripts sao copiados sem alteracao.
 COPY database/mapas.sql \
