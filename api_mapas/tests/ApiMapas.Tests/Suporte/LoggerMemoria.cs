@@ -39,7 +39,54 @@ public sealed class ProvedorLogMemoria : ILoggerProvider
 
         public bool IsEnabled(LogLevel logLevel) => true;
 
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
             dono.Mensagens.Enqueue($"{logLevel} {categoria} {formatter(state, exception)} {exception}");
+            dono.Propriedades.Enqueue(PropriedadesDoEstado.Ler(state));
+        }
+    }
+
+    /// <summary>PO6: valores estruturados de cada log (o que um provedor estruturado gravaria).</summary>
+    public ConcurrentQueue<string> Propriedades { get; } = new();
+}
+
+/// <summary>Le o estado estruturado do LoggerMessage pelo indexador e pelo enumerador.</summary>
+internal static class PropriedadesDoEstado
+{
+    public static string Ler<TState>(TState state)
+    {
+        if (state is not IReadOnlyList<KeyValuePair<string, object?>> lista)
+        {
+            return string.Empty;
+        }
+
+        var partes = new List<string>();
+        for (var i = 0; i < lista.Count; i++)
+        {
+            partes.Add($"{lista[i].Key}={lista[i].Value}");
+        }
+
+        foreach (var (chave, valor) in (IEnumerable<KeyValuePair<string, object?>>)lista)
+        {
+            partes.Add($"{chave}={valor}");
+        }
+
+        System.Collections.IEnumerable naoGenerico = lista;
+        foreach (var _ in naoGenerico)
+        {
+        }
+
+        try
+        {
+            _ = lista[lista.Count];
+        }
+        catch (IndexOutOfRangeException)
+        {
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+        }
+
+        return string.Join(' ', partes);
     }
 }

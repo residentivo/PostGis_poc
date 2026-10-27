@@ -3,3 +3,15 @@ CREATE TABLE public.mapas (
 	graphy public.geography NULL,
 	metry public.geometry NULL
 );
+-- ---------------------------------------------------------------------
+-- Forma DEPOIS da migracao (PO3; database/migracao_mapas_pk.sql, mais
+-- database/validar_check_mapas.sql). So referencia: NAO executar; a
+-- tabela existente e alterada pela migracao, nao recriada.
+--   CREATE TABLE public.mapas (
+--       id int4 GENERATED ALWAYS AS IDENTITY( INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START 1 CACHE 1 NO CYCLE) NOT NULL,
+--       graphy public.geography NULL,
+--       metry public.geometry NULL,
+--       CONSTRAINT mapas_pkey PRIMARY KEY (id),
+--       CONSTRAINT mapas_nao_vazia CHECK (graphy IS NOT NULL OR metry IS NOT NULL)
+--   );
+-- ---------------------------------------------------------------------

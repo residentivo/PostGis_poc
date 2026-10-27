@@ -1,5 +1,4 @@
 using System.Data.Common;
-using System.Runtime.CompilerServices;
 using ApiMapas.Dominio;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -8,11 +7,12 @@ using NpgsqlTypes;
 namespace ApiMapas.Infraestrutura.Dados;
 
 /// <summary>
-/// Leitura de public.mapas com Npgsql (A4.3, CA-5, RA-3, RA-12).
-/// SQL copiado EXATAMENTE de api_mapas/sql/consultas_referencia.sql (Q1 e Q2): duas constantes
-/// escolhidas pelo enum <see cref="ColunaMapa"/>, unico parametro @id com NpgsqlDbType.Integer,
-/// sem concatenacao. Cada chamada abre sua propria conexao do pool (uma por requisicao) e o
-/// CancellationToken da requisicao chega ate OpenConnectionAsync/ExecuteReaderAsync/ReadAsync.
+/// Leitura de UMA geometria de public.mapas por id com Npgsql (D-N7, RS-23; RA-3, RA-12).
+/// SQL copiado EXATAMENTE de api_mapas/sql/consultas_referencia.sql (Q1 e Q2, com LIMIT 2 e a
+/// coluna "preenchida"): duas constantes escolhidas pelo enum <see cref="ColunaMapa"/>, unico
+/// parametro @id com NpgsqlDbType.Integer, sem concatenacao. Cada chamada abre sua propria conexao
+/// do pool (uma por requisicao) e o CancellationToken da requisicao chega ate
+/// OpenConnectionAsync/ExecuteReaderAsync/ReadAsync.
 /// </summary>
 public sealed partial class MapasRepository : IMapasRepository
 {
@@ -31,14 +31,12 @@ public sealed partial class MapasRepository : IMapasRepository
         "       CASE WHEN GeometryType(t.g) = 'POINT' AND ST_SRID(t.g) <> 0\n" +
         "            THEN ST_X(ST_Transform(t.g, 4326)) END              AS longitude,\n" +
         "       CASE WHEN GeometryType(t.g) = 'POINT' AND ST_SRID(t.g) <> 0\n" +
-        "            THEN ST_Y(ST_Transform(t.g, 4326)) END              AS latitude\n" +
-        "FROM (SELECT m.ctid AS linha, m.graphy::geometry AS g\n" +
+        "            THEN ST_Y(ST_Transform(t.g, 4326)) END              AS latitude,\n" +
+        "       (t.g IS NOT NULL)                                        AS preenchida\n" +
+        "FROM (SELECT m.graphy::geometry AS g\n" +
         "      FROM public.mapas AS m\n" +
         "      WHERE m.id = @id\n" +
-        "        AND m.graphy IS NOT NULL\n" +
-        "      ORDER BY m.ctid\n" +
-        "      LIMIT 101) AS t\n" +
-        "ORDER BY t.linha;";
+        "      LIMIT 2) AS t;";
 
     /// <summary>Q2 - GET /api/mapas/{id}/metry.</summary>
     internal const string SqlMetry =
@@ -55,16 +53,17 @@ public sealed partial class MapasRepository : IMapasRepository
         "       CASE WHEN GeometryType(t.g) = 'POINT' AND ST_SRID(t.g) <> 0\n" +
         "            THEN ST_X(ST_Transform(t.g, 4326)) END              AS longitude,\n" +
         "       CASE WHEN GeometryType(t.g) = 'POINT' AND ST_SRID(t.g) <> 0\n" +
-        "            THEN ST_Y(ST_Transform(t.g, 4326)) END              AS latitude\n" +
-        "FROM (SELECT m.ctid AS linha, m.metry AS g\n" +
+        "            THEN ST_Y(ST_Transform(t.g, 4326)) END              AS latitude,\n" +
+        "       (t.g IS NOT NULL)                                        AS preenchida\n" +
+        "FROM (SELECT m.metry AS g\n" +
         "      FROM public.mapas AS m\n" +
         "      WHERE m.id = @id\n" +
-        "        AND m.metry IS NOT NULL\n" +
-        "      ORDER BY m.ctid\n" +
-        "      LIMIT 101) AS t\n" +
-        "ORDER BY t.linha;";
+        "      LIMIT 2) AS t;";
 
     internal const string ParametroId = "id";
+
+    /// <summary>Indice da coluna "preenchida" (lida ANTES das demais: com a coluna NULL, 0 a 7 vem NULL).</summary>
+    internal const int IndicePreenchida = 8;
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly ILogger<MapasRepository> _log;
@@ -96,86 +95,75 @@ public sealed partial class MapasRepository : IMapasRepository
         return comando;
     }
 
-    public async IAsyncEnumerable<GeometriaMapa> ListarPorIdAsync(
-        IdMapa id,
-        ColunaMapa coluna,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+    public async Task<LeituraMapa> ObterPorIdAsync(IdMapa id, ColunaMapa coluna, CancellationToken cancellationToken)
     {
         var nomeColuna = coluna.Nome();
-        NpgsqlConnection? conexao = null;
-        NpgsqlCommand? comando = null;
-        NpgsqlDataReader? leitor = null;
-
-        try
+        var etapa = "abrir conexao";
+        var aberta = false;
+        var comando = CriarComando(coluna, id);
+        await using (comando.ConfigureAwait(false))
         {
-            comando = CriarComando(coluna, id);
-
             try
             {
                 LogAbrindoConexao(nomeColuna);
-                conexao = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-                comando.Connection = conexao;
-
-                LogExecutando(nomeColuna, id.Valor);
-                leitor = await comando.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is NpgsqlException or TimeoutException or DbException)
-            {
-                LogarFalha(ex, "abrir conexao/executar consulta", nomeColuna, id);
-                throw;
-            }
-
-            var linhas = 0;
-            while (true)
-            {
-                bool temLinha;
-                GeometriaMapa? geometria = null;
-                try
+                var conexao = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                aberta = true;
+                await using (conexao.ConfigureAwait(false))
                 {
-                    temLinha = await leitor.ReadAsync(cancellationToken).ConfigureAwait(false);
-                    if (temLinha)
+                    comando.Connection = conexao;
+
+                    etapa = "executar consulta";
+                    LogExecutando(nomeColuna, id.Valor);
+                    var leitor = await comando.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                    await using (leitor.ConfigureAwait(false))
                     {
-                        geometria = Ler(leitor);
+                        etapa = "ler linhas";
+                        var resultado = await LerAsync(leitor, cancellationToken).ConfigureAwait(false);
+                        LogLeituraConcluida(nomeColuna, resultado.GetType().Name, id.Valor);
+                        return resultado;
                     }
                 }
-                catch (Exception ex) when (ex is NpgsqlException or TimeoutException or DbException or InvalidCastException)
+            }
+            catch (Exception ex) when (ex is NpgsqlException or TimeoutException or DbException or InvalidCastException)
+            {
+                LogarFalha(ex, etapa, nomeColuna, id);
+                throw;
+            }
+            finally
+            {
+                if (aberta)
                 {
-                    LogarFalha(ex, "ler linhas", nomeColuna, id);
-                    throw;
+                    LogConexaoDevolvida(nomeColuna);
                 }
-
-                if (!temLinha || geometria is null)
-                {
-                    break;
-                }
-
-                linhas++;
-                yield return geometria;
-            }
-
-            LogLeituraConcluida(nomeColuna, linhas, id.Valor);
-        }
-        finally
-        {
-            if (leitor is not null)
-            {
-                await leitor.DisposeAsync().ConfigureAwait(false);
-            }
-
-            if (comando is not null)
-            {
-                await comando.DisposeAsync().ConfigureAwait(false);
-            }
-
-            if (conexao is not null)
-            {
-                await conexao.DisposeAsync().ConfigureAwait(false);
-                LogConexaoDevolvida(nomeColuna);
             }
         }
     }
 
-    /// <summary>Le a linha corrente na ordem das colunas de Q1/Q2.</summary>
+    /// <summary>
+    /// RS-23, nesta ordem: 0 linhas = NaoEncontrada; 2 linhas = Duplicada; 1 linha com
+    /// preenchida = false = ColunaVazia; senao Encontrada. A primeira linha e lida antes de avancar.
+    /// </summary>
+    private static async Task<LeituraMapa> LerAsync(NpgsqlDataReader leitor, CancellationToken cancellationToken)
+    {
+        if (!await leitor.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return LeituraMapa.NaoEncontrada.Instancia;
+        }
+
+        var preenchida = !leitor.IsDBNull(IndicePreenchida) && leitor.GetBoolean(IndicePreenchida);
+        var geometria = preenchida ? Ler(leitor) : null;
+
+        if (await leitor.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return LeituraMapa.Duplicada.Instancia;
+        }
+
+        return geometria is null
+            ? LeituraMapa.ColunaVazia.Instancia
+            : new LeituraMapa.Encontrada(geometria);
+    }
+
+    /// <summary>Le a linha corrente na ordem das colunas de Q1/Q2 (0 a 7).</summary>
     private static GeometriaMapa Ler(NpgsqlDataReader leitor) => new(
         Tipo: leitor.GetString(0),
         Srid: leitor.GetInt32(1),
@@ -204,8 +192,8 @@ public sealed partial class MapasRepository : IMapasRepository
     [LoggerMessage(EventId = 2002, Level = LogLevel.Debug, Message = "Executando a consulta constante da coluna {Coluna} com @id = {Id}.")]
     private partial void LogExecutando(string coluna, int id);
 
-    [LoggerMessage(EventId = 2003, Level = LogLevel.Debug, Message = "Leitura da coluna {Coluna} concluida: {Linhas} linha(s) lida(s) para o id {Id}.")]
-    private partial void LogLeituraConcluida(string coluna, int linhas, int id);
+    [LoggerMessage(EventId = 2003, Level = LogLevel.Debug, Message = "Leitura da coluna {Coluna} concluida: resultado {Resultado} para o id {Id}.")]
+    private partial void LogLeituraConcluida(string coluna, string resultado, int id);
 
     [LoggerMessage(EventId = 2004, Level = LogLevel.Debug, Message = "Conexao devolvida ao pool (coluna {Coluna}).")]
     private partial void LogConexaoDevolvida(string coluna);

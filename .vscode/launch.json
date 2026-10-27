@@ -99,6 +99,29 @@
         "PG_PASSWORD": "${input:pgPassword}",
         "PG_SSLMODE": "${input:pgSslMode}"
       }
+    },
+    {
+      // API com ESCRITA (PUT). Pre-requisitos: backup (database/backup_mapas.*) e role api_mapas_escrita
+      // (database/README.md). PG_ESCRITA_PASSWORD so como input password, sem default (RP-9).
+      // Com PG_SSLMODE Disable/Prefer a escrita fica desligada (PUT responde 405).
+      "name": "ApiMapas: API com escrita PUT (http://localhost:5080)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-api-mapas",
+      "program": "${workspaceFolder}/api_mapas/src/ApiMapas.Api/bin/Debug/net10.0/ApiMapas.Api.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/api_mapas/src/ApiMapas.Api",
+      "console": "internalConsole",
+      "stopAtEntry": false,
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Production",
+        "ASPNETCORE_URLS": "http://localhost:5080",
+        "PG_USER": "${input:pgUser}",
+        "PG_PASSWORD": "${input:pgPassword}",
+        "PG_SSLMODE": "${input:pgSslMode}",
+        "PG_ESCRITA_USER": "${input:pgEscritaUser}",
+        "PG_ESCRITA_PASSWORD": "${input:pgEscritaPassword}"
+      }
     }
   ],
   "inputs": [
@@ -132,6 +155,17 @@
       "description": "PG_SSLMODE da API (Disable so com a excecao registrada em tarefas/afazer.md; o servidor hoje esta com ssl=off)",
       "options": ["Require", "VerifyFull", "VerifyCA", "Disable"],
       "default": "Require"
+    },
+    {
+      "id": "pgEscritaUser",
+      "type": "promptString",
+      "description": "PG_ESCRITA_USER (role de escrita, ex.: api_mapas_escrita; nunca a mesma de PG_USER)"
+    },
+    {
+      "id": "pgEscritaPassword",
+      "type": "promptString",
+      "description": "PG_ESCRITA_PASSWORD (diferente de PG_PASSWORD)",
+      "password": true
     },
     {
       "id": "wktMetry",

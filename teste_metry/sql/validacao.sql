@@ -32,7 +32,8 @@ WHERE f_table_schema = 'public'
   AND f_geometry_column = 'metry';
 
 -- Tipo de metry e identity de id (esperado: metry USER-DEFINED/geometry;
--- id is_identity = YES, identity_generation = BY DEFAULT)
+-- id is_identity = YES, identity_generation = BY DEFAULT antes da
+-- migracao database/migracao_mapas_pk.sql e ALWAYS depois)
 SELECT column_name, data_type, udt_schema, udt_name,
        is_nullable, is_identity, identity_generation, column_default
 FROM information_schema.columns
@@ -46,12 +47,32 @@ FROM spatial_ref_sys
 WHERE srid IN (4326, 4674, 3857, 31983)
 ORDER BY srid;
 
--- M3.3 Restricoes em public.mapas (esperado: nenhuma linha).
--- Nenhum CHECK sobre metry (ex.: enforce_srid) e, conforme S3, nenhuma
--- PK/UNIQUE em id.
+-- M3.3 Restricoes em public.mapas.
+-- Antes da migracao: nenhuma linha (S3: sem PK/UNIQUE em id).
+-- Depois (PO3.8, D-N11): 2 linhas - mapas_pkey | p | PRIMARY KEY (id) e
+-- mapas_nao_vazia | c | CHECK (((graphy IS NOT NULL) OR (metry IS NOT
+-- NULL))) (com "NOT VALID" ate o VALIDATE). Continua sem CHECK de SRID
+-- sobre metry (ex.: enforce_srid).
 SELECT conname, contype, pg_get_constraintdef(oid) AS definicao
 FROM pg_constraint
 WHERE conrelid = 'public.mapas'::regclass;
+
+-- PO3.8 (informativo) PK exata em id: esperado pk_exata = t e
+-- id_always = t depois da migracao (f antes). Com t, cada INSERT do
+-- programa (sem id) ganha um id proprio e o DELETE da limpeza dos testes
+-- de integracao (WHERE id = @id ...) apaga no maximo 1 linha.
+SELECT EXISTS (SELECT 1
+               FROM pg_constraint k
+               JOIN pg_index i ON i.indexrelid = k.conindid
+               JOIN pg_attribute a ON a.attrelid = k.conrelid
+                                  AND a.attname = 'id' AND NOT a.attisdropped
+               WHERE k.conrelid = 'public.mapas'::regclass
+                 AND k.contype = 'p' AND k.conname = 'mapas_pkey'
+                 AND k.conkey = ARRAY[a.attnum] AND NOT k.condeferrable
+                 AND i.indisvalid AND i.indisunique AND i.indisprimary) AS pk_exata,
+       EXISTS (SELECT 1 FROM pg_attribute a
+               WHERE a.attrelid = 'public.mapas'::regclass AND a.attname = 'id'
+                 AND a.attidentity = 'a') AS id_always;
 
 -- M3.3 Triggers de usuario em public.mapas (esperado: nenhuma linha)
 SELECT tgname, tgenabled, pg_get_triggerdef(oid) AS definicao

@@ -1,0 +1,268 @@
+-- =====================================================================
+-- database/mescla_duplicados_mapas.sql  (PO3.5 - D-N3, Q6, RS-24, R-N5)
+-- Base: casaos | Alvo: public.mapas (ANTES da migracao para PK)
+--
+-- MODELO COMENTADO. Rodar este arquivo como esta NAO FAZ NADA: todo o
+-- codigo esta em comentario, com um prefixo por parte:
+--   "--: "  Parte A - mescla automatica dos ids MESCLAVEIS
+--   "--c: " Parte B - um id CONFLITANTE, com a linha escolhida pelo usuario
+-- O DBA extrai a parte desejada com sed e manda direto para o psql (sem
+-- gravar arquivo). OS AGENTES NAO EXECUTAM NADA.
+--
+-- Passo 4 do PU-DBA: depois do backup e do relatorio
+-- (database/relatorio_duplicados_mapas.sql), antes da migracao.
+--
+-- Regras comuns (RS-24):
+--   - uma transacao, com SET LOCAL lock_timeout 5s / statement_timeout
+--     5min e LOCK TABLE public.mapas IN EXCLUSIVE MODE (leituras
+--     continuam; escritas esperam);
+--   - os ids sao RECLASSIFICADOS dentro da transacao, depois do lock (o
+--     relatorio pode estar velho);
+--   - todo UPDATE/DELETE e feito por ctid + id e exige rowcount = 1; se
+--     nao, RAISE e ROLLBACK de tudo;
+--   - a Parte A nunca toca nos ids conflitantes;
+--   - so contagens e ids aparecem na saida; nenhuma geometria;
+--   - PADRAO = ENSAIO: termina em ROLLBACK. So grava com -v confirmar=1
+--     EXATAMENTE (PO5.C1, achado 4): confirmar=0, =nao, =sim, vazio ou
+--     ausente -> ROLLBACK. A comparacao (:'confirmar' = '1') e feita no
+--     servidor, com o valor citado pelo psql, e vira a variavel gravar.
+--
+-- ---------------------------------------------------------------------
+-- Parte A - ids MESCLAVEIS (no maximo 1 linha com graphy e 1 com metry)
+-- ---------------------------------------------------------------------
+-- Para cada id: a linha "alvo" e a que tem as duas colunas; senao a que
+-- tem graphy; senao a que tem metry; senao a de menor ctid. A coluna que
+-- estiver em outra linha e copiada para o alvo (UPDATE por ctid), o
+-- conteudo e conferido por md5 do EWKB e as demais linhas do id (a de
+-- origem e as vazias) sao apagadas uma a uma por ctid. Um id so com
+-- linhas vazias fica com UMA linha vazia (o relatorio marca fica_vazio;
+-- o usuario decide antes do VALIDATE).
+--
+-- Ensaio (ROLLBACK) e depois gravacao, no host do servidor:
+--   sed -n 's/^--: //p' database/mescla_duplicados_mapas.sql \
+--     | sudo docker exec -i <container> psql -X -v ON_ERROR_STOP=1 -U casaos -d casaos -f -
+--   sed -n 's/^--: //p' database/mescla_duplicados_mapas.sql \
+--     | sudo docker exec -i <container> psql -X -v ON_ERROR_STOP=1 -v confirmar=1 -U casaos -d casaos -f -
+-- Depois: relatorio de novo (esperado: ids_mesclaveis = 0).
+--
+--: \set ON_ERROR_STOP on
+--: BEGIN;
+--: SET LOCAL lock_timeout = '5s';
+--: SET LOCAL statement_timeout = '5min';
+--: LOCK TABLE public.mapas IN EXCLUSIVE MODE;
+--: DO $$
+--: DECLARE
+--:     r          record;
+--:     v_alvo     tid;
+--:     v_g        tid;
+--:     v_m        tid;
+--:     v_md5_g    text;
+--:     v_md5_m    text;
+--:     v_outro    tid;
+--:     v_n        bigint;
+--:     v_ids      int := 0;
+--:     v_apagadas bigint := 0;
+--:     v_resto    int;
+--: BEGIN
+--:     IF current_database() <> 'casaos' THEN
+--:         RAISE EXCEPTION 'mescla: deve rodar na base casaos (atual: %)', current_database();
+--:     END IF;
+--:     -- Reclassificacao dentro da transacao, depois do lock.
+--:     FOR r IN
+--:         SELECT id
+--:         FROM public.mapas
+--:         WHERE id IS NOT NULL
+--:         GROUP BY id
+--:         HAVING count(*) > 1
+--:            AND count(*) FILTER (WHERE graphy IS NOT NULL) <= 1
+--:            AND count(*) FILTER (WHERE metry  IS NOT NULL) <= 1
+--:         ORDER BY id
+--:     LOOP
+--:         SELECT ctid INTO v_alvo FROM public.mapas WHERE id = r.id
+--:         ORDER BY (graphy IS NOT NULL AND metry IS NOT NULL) DESC,
+--:                  (graphy IS NOT NULL) DESC, (metry IS NOT NULL) DESC, ctid
+--:         LIMIT 1;
+--:         SELECT ctid, md5(ST_AsEWKB(graphy::geometry)) INTO v_g, v_md5_g
+--:         FROM public.mapas WHERE id = r.id AND graphy IS NOT NULL;
+--:         SELECT ctid, md5(ST_AsEWKB(metry)) INTO v_m, v_md5_m
+--:         FROM public.mapas WHERE id = r.id AND metry IS NOT NULL;
+--:         -- Copia para o alvo a coluna que esta em outra linha.
+--:         IF v_g IS NOT NULL AND v_g <> v_alvo THEN
+--:             UPDATE public.mapas
+--:                SET graphy = (SELECT s.graphy FROM public.mapas s WHERE s.ctid = v_g AND s.id = r.id)
+--:              WHERE ctid = v_alvo AND id = r.id AND graphy IS NULL
+--:             RETURNING ctid INTO v_alvo;
+--:             GET DIAGNOSTICS v_n = ROW_COUNT;
+--:             IF v_n <> 1 THEN
+--:                 RAISE EXCEPTION 'mescla id %: UPDATE de graphy afetou % linha(s) (esperado 1)', r.id, v_n;
+--:             END IF;
+--:         END IF;
+--:         IF v_m IS NOT NULL AND v_m <> v_alvo THEN
+--:             UPDATE public.mapas
+--:                SET metry = (SELECT s.metry FROM public.mapas s WHERE s.ctid = v_m AND s.id = r.id)
+--:              WHERE ctid = v_alvo AND id = r.id AND metry IS NULL
+--:             RETURNING ctid INTO v_alvo;
+--:             GET DIAGNOSTICS v_n = ROW_COUNT;
+--:             IF v_n <> 1 THEN
+--:                 RAISE EXCEPTION 'mescla id %: UPDATE de metry afetou % linha(s) (esperado 1)', r.id, v_n;
+--:             END IF;
+--:         END IF;
+--:         -- Apaga as demais linhas do id, uma a uma, por ctid.
+--:         FOR v_outro IN SELECT ctid FROM public.mapas WHERE id = r.id AND ctid <> v_alvo LOOP
+--:             DELETE FROM public.mapas WHERE ctid = v_outro AND id = r.id;
+--:             GET DIAGNOSTICS v_n = ROW_COUNT;
+--:             IF v_n <> 1 THEN
+--:                 RAISE EXCEPTION 'mescla id %: DELETE por ctid afetou % linha(s) (esperado 1)', r.id, v_n;
+--:             END IF;
+--:             v_apagadas := v_apagadas + 1;
+--:         END LOOP;
+--:         -- Conferencia do id: 1 linha, com o mesmo conteudo (md5) de antes.
+--:         IF (SELECT count(*) FROM public.mapas WHERE id = r.id) <> 1
+--:            OR (SELECT md5(ST_AsEWKB(graphy::geometry)) FROM public.mapas WHERE id = r.id) IS DISTINCT FROM v_md5_g
+--:            OR (SELECT md5(ST_AsEWKB(metry)) FROM public.mapas WHERE id = r.id) IS DISTINCT FROM v_md5_m THEN
+--:             RAISE EXCEPTION 'mescla id %: conferencia falhou (linhas ou conteudo diferentes do esperado)', r.id;
+--:         END IF;
+--:         v_ids := v_ids + 1;
+--:     END LOOP;
+--:     -- Nenhum mesclavel pode sobrar; os conflitantes ficam intactos.
+--:     IF EXISTS (SELECT 1 FROM public.mapas WHERE id IS NOT NULL GROUP BY id
+--:                HAVING count(*) > 1
+--:                   AND count(*) FILTER (WHERE graphy IS NOT NULL) <= 1
+--:                   AND count(*) FILTER (WHERE metry  IS NOT NULL) <= 1) THEN
+--:         RAISE EXCEPTION 'mescla: ainda ha ids mesclaveis depois da mescla';
+--:     END IF;
+--:     SELECT count(*) INTO v_resto FROM (
+--:         SELECT id FROM public.mapas WHERE id IS NOT NULL GROUP BY id HAVING count(*) > 1) AS d;
+--:     RAISE NOTICE 'mescla: % id(s) mesclado(s), % linha(s) apagada(s); % id(s) conflitante(s) intocado(s)',
+--:         v_ids, v_apagadas, v_resto;
+--: END
+--: $$;
+--: \if :{?confirmar}
+--: SELECT (:'confirmar' = '1') AS gravar \gset
+--: \else
+--: \set gravar false
+--: \endif
+--: \if :gravar
+--: COMMIT;
+--: \echo '>> mescla GRAVADA (COMMIT).'
+--: \else
+--: ROLLBACK;
+--: \echo '>> ENSAIO: nada foi gravado (ROLLBACK). Para gravar, rode de novo com -v confirmar=1.'
+--: \endif
+--
+-- ---------------------------------------------------------------------
+-- Parte B - UM id CONFLITANTE, com a escolha do USUARIO (R-N5)
+-- ---------------------------------------------------------------------
+-- O usuario escolhe, pela secao R4 do relatorio (ctid + md5), de qual
+-- linha vem o graphy e de qual vem o metry que vao ficar (podem ser a
+-- mesma linha; "nenhum" = a coluna fica NULL). O md5 e conferido antes
+-- de qualquer escrita: se o ctid mudou (UPDATE/VACUUM FULL depois do
+-- relatorio), o script aborta e o relatorio deve ser rodado de novo.
+-- A linha de graphy (ou, sem graphy, a de metry) vira o alvo; o metry
+-- escolhido e gravado nela se estiver em outra linha; as demais linhas
+-- do id sao apagadas uma a uma por ctid (rowcount = 1).
+-- Uma execucao por id. Parametros via psql -v (nada e editado no arquivo):
+--   sed -n 's/^--c: //p' database/mescla_duplicados_mapas.sql \
+--     | sudo docker exec -i <container> psql -X -v ON_ERROR_STOP=1 \
+--         -v id=<id> \
+--         -v graphy_ctid='(<pagina>,<item>)' -v graphy_md5=<md5> \
+--         -v metry_ctid=nenhum -v metry_md5=nenhum \
+--         [-v confirmar=1] -U casaos -d casaos -f -
+-- (sem confirmar, ou confirmar diferente de 1 = ensaio com ROLLBACK)
+--
+--c: \set ON_ERROR_STOP on
+--c: BEGIN;
+--c: SET LOCAL lock_timeout = '5s';
+--c: SET LOCAL statement_timeout = '5min';
+--c: LOCK TABLE public.mapas IN EXCLUSIVE MODE;
+--c: SELECT set_config('mescla.id', :'id', true),
+--c:        set_config('mescla.graphy_ctid', :'graphy_ctid', true),
+--c:        set_config('mescla.graphy_md5', :'graphy_md5', true),
+--c:        set_config('mescla.metry_ctid', :'metry_ctid', true),
+--c:        set_config('mescla.metry_md5', :'metry_md5', true);
+--c: DO $$
+--c: DECLARE
+--c:     v_id     int4 := current_setting('mescla.id')::int4;
+--c:     v_g      tid  := nullif(current_setting('mescla.graphy_ctid'), 'nenhum')::tid;
+--c:     v_md5_g  text := nullif(current_setting('mescla.graphy_md5'), 'nenhum');
+--c:     v_m      tid  := nullif(current_setting('mescla.metry_ctid'), 'nenhum')::tid;
+--c:     v_md5_m  text := nullif(current_setting('mescla.metry_md5'), 'nenhum');
+--c:     v_alvo   tid;
+--c:     v_outro  tid;
+--c:     v_n      bigint;
+--c:     v_apagadas bigint := 0;
+--c: BEGIN
+--c:     IF current_database() <> 'casaos' THEN
+--c:         RAISE EXCEPTION 'conflitante: deve rodar na base casaos (atual: %)', current_database();
+--c:     END IF;
+--c:     IF v_g IS NULL AND v_m IS NULL THEN
+--c:         RAISE EXCEPTION 'conflitante id %: informe graphy_ctid e/ou metry_ctid', v_id;
+--c:     END IF;
+--c:     IF (v_g IS NULL) <> (v_md5_g IS NULL) OR (v_m IS NULL) <> (v_md5_m IS NULL) THEN
+--c:         RAISE EXCEPTION 'conflitante id %: cada ctid informado precisa do md5 correspondente', v_id;
+--c:     END IF;
+--c:     -- Reclassificacao dentro da transacao: o id tem de continuar com 2+ linhas.
+--c:     IF (SELECT count(*) FROM public.mapas WHERE id = v_id) < 2 THEN
+--c:         RAISE EXCEPTION 'conflitante id %: o id nao tem mais de uma linha; rodar o relatorio de novo', v_id;
+--c:     END IF;
+--c:     -- Confere ctid + md5 antes de qualquer escrita.
+--c:     IF v_g IS NOT NULL AND NOT EXISTS (
+--c:            SELECT 1 FROM public.mapas WHERE ctid = v_g AND id = v_id
+--c:               AND md5(ST_AsEWKB(graphy::geometry)) = v_md5_g) THEN
+--c:         RAISE EXCEPTION 'conflitante id %: linha de graphy (ctid %) nao confere com o md5; rodar o relatorio de novo', v_id, v_g;
+--c:     END IF;
+--c:     IF v_m IS NOT NULL AND NOT EXISTS (
+--c:            SELECT 1 FROM public.mapas WHERE ctid = v_m AND id = v_id
+--c:               AND md5(ST_AsEWKB(metry)) = v_md5_m) THEN
+--c:         RAISE EXCEPTION 'conflitante id %: linha de metry (ctid %) nao confere com o md5; rodar o relatorio de novo', v_id, v_m;
+--c:     END IF;
+--c:     v_alvo := coalesce(v_g, v_m);
+--c:     -- Alvo com o metry escolhido (ou NULL, se "nenhum").
+--c:     IF v_m IS DISTINCT FROM v_alvo THEN
+--c:         UPDATE public.mapas
+--c:            SET metry = (SELECT s.metry FROM public.mapas s WHERE s.ctid = v_m AND s.id = v_id)
+--c:          WHERE ctid = v_alvo AND id = v_id
+--c:         RETURNING ctid INTO v_alvo;
+--c:         GET DIAGNOSTICS v_n = ROW_COUNT;
+--c:         IF v_n <> 1 THEN
+--c:             RAISE EXCEPTION 'conflitante id %: UPDATE de metry afetou % linha(s) (esperado 1)', v_id, v_n;
+--c:         END IF;
+--c:     END IF;
+--c:     -- Alvo com o graphy escolhido (so muda se "nenhum": o alvo de metry pode ter graphy).
+--c:     IF v_g IS NULL THEN
+--c:         UPDATE public.mapas SET graphy = NULL WHERE ctid = v_alvo AND id = v_id
+--c:         RETURNING ctid INTO v_alvo;
+--c:         GET DIAGNOSTICS v_n = ROW_COUNT;
+--c:         IF v_n <> 1 THEN
+--c:             RAISE EXCEPTION 'conflitante id %: UPDATE de graphy afetou % linha(s) (esperado 1)', v_id, v_n;
+--c:         END IF;
+--c:     END IF;
+--c:     FOR v_outro IN SELECT ctid FROM public.mapas WHERE id = v_id AND ctid <> v_alvo LOOP
+--c:         DELETE FROM public.mapas WHERE ctid = v_outro AND id = v_id;
+--c:         GET DIAGNOSTICS v_n = ROW_COUNT;
+--c:         IF v_n <> 1 THEN
+--c:             RAISE EXCEPTION 'conflitante id %: DELETE por ctid afetou % linha(s) (esperado 1)', v_id, v_n;
+--c:         END IF;
+--c:         v_apagadas := v_apagadas + 1;
+--c:     END LOOP;
+--c:     IF (SELECT count(*) FROM public.mapas WHERE id = v_id) <> 1
+--c:        OR (SELECT md5(ST_AsEWKB(graphy::geometry)) FROM public.mapas WHERE id = v_id) IS DISTINCT FROM v_md5_g
+--c:        OR (SELECT md5(ST_AsEWKB(metry)) FROM public.mapas WHERE id = v_id) IS DISTINCT FROM v_md5_m THEN
+--c:         RAISE EXCEPTION 'conflitante id %: conferencia falhou (linhas ou conteudo diferentes do escolhido)', v_id;
+--c:     END IF;
+--c:     RAISE NOTICE 'conflitante id %: 1 linha mantida, % linha(s) apagada(s)', v_id, v_apagadas;
+--c: END
+--c: $$;
+--c: \if :{?confirmar}
+--c: SELECT (:'confirmar' = '1') AS gravar \gset
+--c: \else
+--c: \set gravar false
+--c: \endif
+--c: \if :gravar
+--c: COMMIT;
+--c: \echo '>> conflitante GRAVADO (COMMIT).'
+--c: \else
+--c: ROLLBACK;
+--c: \echo '>> ENSAIO: nada foi gravado (ROLLBACK). Para gravar, rode de novo com -v confirmar=1.'
+--c: \endif
+-- =====================================================================

@@ -1,17 +1,17 @@
-using System.Runtime.CompilerServices;
 using ApiMapas.Dominio;
 
 namespace ApiMapas.Tests.Suporte;
 
 /// <summary>
-/// Mock de <see cref="IMapasRepository"/>: devolve as geometrias configuradas (ou lanca a
-/// excecao configurada) e registra as chamadas, para provar que ids invalidos nao tocam o banco.
+/// Mock de <see cref="IMapasRepository"/> (uma geometria por id, D-N7): 0 itens configurados =
+/// NaoEncontrada; 1 = Encontrada; 2 ou mais = Duplicada (RS-23). <see cref="ColunaVazia"/> simula a
+/// linha com a coluna NULL. Registra as chamadas, para provar que ids invalidos nao tocam o banco.
 /// </summary>
 public sealed class RepositorioFalso : IMapasRepository
 {
     private readonly Func<IdMapa, ColunaMapa, IEnumerable<GeometriaMapa>> _fonte;
     private readonly Exception? _erro;
-    private readonly int _lancarAposItens;
+    private readonly bool _colunaVazia;
     private int _chamadas;
 
     public RepositorioFalso(IEnumerable<GeometriaMapa> itens)
@@ -24,26 +24,25 @@ public sealed class RepositorioFalso : IMapasRepository
         _fonte = fonte;
     }
 
-    private RepositorioFalso(Exception erro, int lancarAposItens, IEnumerable<GeometriaMapa> itens)
-        : this(itens)
+    private RepositorioFalso(Exception? erro, bool colunaVazia)
+        : this(Array.Empty<GeometriaMapa>())
     {
         _erro = erro;
-        _lancarAposItens = lancarAposItens;
+        _colunaVazia = colunaVazia;
     }
 
     public static RepositorioFalso Vazio() => new(Array.Empty<GeometriaMapa>());
 
-    public static RepositorioFalso QueLanca(Exception erro, int aposItens = 0, IEnumerable<GeometriaMapa>? itens = null) =>
-        new(erro, aposItens, itens ?? Array.Empty<GeometriaMapa>());
+    /// <summary>Linha existe, mas a coluna da rota e NULL (404).</summary>
+    public static RepositorioFalso ColunaVazia() => new(null, colunaVazia: true);
+
+    public static RepositorioFalso QueLanca(Exception erro) => new(erro, colunaVazia: false);
 
     public int Chamadas => Volatile.Read(ref _chamadas);
 
     public List<(IdMapa Id, ColunaMapa Coluna)> Pedidos { get; } = new();
 
-    public async IAsyncEnumerable<GeometriaMapa> ListarPorIdAsync(
-        IdMapa id,
-        ColunaMapa coluna,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+    public async Task<LeituraMapa> ObterPorIdAsync(IdMapa id, ColunaMapa coluna, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _chamadas);
         lock (Pedidos)
@@ -52,23 +51,24 @@ public sealed class RepositorioFalso : IMapasRepository
         }
 
         await Task.Yield();
-        var emitidos = 0;
-        foreach (var item in _fonte(id, coluna))
-        {
-            if (_erro is not null && emitidos >= _lancarAposItens)
-            {
-                throw _erro;
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            emitidos++;
-            yield return item;
-        }
-
+        cancellationToken.ThrowIfCancellationRequested();
         if (_erro is not null)
         {
             throw _erro;
         }
+
+        if (_colunaVazia)
+        {
+            return LeituraMapa.ColunaVazia.Instancia;
+        }
+
+        var itens = _fonte(id, coluna).Take(2).ToList();
+        return itens.Count switch
+        {
+            0 => LeituraMapa.NaoEncontrada.Instancia,
+            1 => new LeituraMapa.Encontrada(itens[0]),
+            _ => LeituraMapa.Duplicada.Instancia,
+        };
     }
 }
 

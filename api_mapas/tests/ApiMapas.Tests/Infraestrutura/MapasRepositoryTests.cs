@@ -12,8 +12,8 @@ namespace ApiMapas.Tests.Infraestrutura;
 public class MapasRepositoryTests
 {
     [Theory]
-    [InlineData(ColunaMapa.Graphy, "m.graphy::geometry AS g", "m.graphy IS NOT NULL", 1)]
-    [InlineData(ColunaMapa.Metry, "m.metry AS g", "m.metry IS NOT NULL", 2147483647)]
+    [InlineData(ColunaMapa.Graphy, "m.graphy::geometry AS g", "(t.g IS NOT NULL)", 1)]
+    [InlineData(ColunaMapa.Metry, "m.metry AS g", "(t.g IS NOT NULL)", 2147483647)]
     public void CriarComando_SqlConstanteEParametroInteger(ColunaMapa coluna, string origem, string filtro, int valor)
     {
         Assert.True(IdMapa.TentarCriar(valor.ToString(System.Globalization.CultureInfo.InvariantCulture), out var id));
@@ -24,8 +24,8 @@ public class MapasRepositoryTests
         Assert.Contains(origem, comando.CommandText, StringComparison.Ordinal);
         Assert.Contains(filtro, comando.CommandText, StringComparison.Ordinal);
         Assert.Contains("WHERE m.id = @id", comando.CommandText, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 101", comando.CommandText, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY m.ctid", comando.CommandText, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 2", comando.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("ctid", comando.CommandText, StringComparison.Ordinal);
         Assert.DoesNotContain("2147483647", comando.CommandText, StringComparison.Ordinal);
         Assert.DoesNotContain("= 1", comando.CommandText, StringComparison.Ordinal);
 
@@ -46,7 +46,7 @@ public class MapasRepositoryTests
 
         Assert.DoesNotContain("ctid", selectExterno, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("linha", selectExterno, StringComparison.OrdinalIgnoreCase);
-        var aliases = new[] { "AS tipo", "AS srid", "AS wkt", "AS geojson", "AS x", "AS y", "AS longitude", "AS latitude" };
+        var aliases = new[] { "AS tipo", "AS srid", "AS wkt", "AS geojson", "AS x", "AS y", "AS longitude", "AS latitude", "AS preenchida" };
         var posicoes = aliases.Select(a => selectExterno.IndexOf(a, StringComparison.Ordinal)).ToArray();
         Assert.All(posicoes, p => Assert.True(p > 0));
         Assert.Equal(posicoes.OrderBy(p => p), posicoes);
@@ -56,15 +56,15 @@ public class MapasRepositoryTests
     }
 
     [Theory]
-    [InlineData(ColunaMapa.Graphy, "-- Q1")]
-    [InlineData(ColunaMapa.Metry, "-- Q2")]
+    [InlineData(ColunaMapa.Graphy, "-- Q1 (graphy)")]
+    [InlineData(ColunaMapa.Metry, "-- Q2 (metry)")]
     public void Sql_IdenticoAoArquivoDeReferenciaDoDataBrain(ColunaMapa coluna, string marcador)
     {
         var arquivo = File.ReadAllText(Path.Combine(RaizSolucao(), "sql", "consultas_referencia.sql")).Replace("\r\n", "\n", StringComparison.Ordinal);
         var inicioBloco = arquivo.IndexOf(marcador, StringComparison.Ordinal);
         Assert.True(inicioBloco >= 0);
         var inicio = arquivo.IndexOf("SELECT GeometryType", inicioBloco, StringComparison.Ordinal);
-        var fim = arquivo.IndexOf("ORDER BY t.linha;", inicio, StringComparison.Ordinal) + "ORDER BY t.linha;".Length;
+        var fim = arquivo.IndexOf("LIMIT 2) AS t;", inicio, StringComparison.Ordinal) + "LIMIT 2) AS t;".Length;
 
         Assert.Equal(arquivo[inicio..fim], MapasRepository.SqlPara(coluna));
     }
@@ -112,9 +112,7 @@ public class MapasRepositoryTests
 
         var ex = await Assert.ThrowsAnyAsync<Exception>(async () =>
         {
-            await foreach (var _ in repo.ListarPorIdAsync(id, coluna, CancellationToken.None))
-            {
-            }
+            await repo.ObterPorIdAsync(id, coluna, CancellationToken.None);
         });
 
         Assert.True(ex is NpgsqlException or TimeoutException or System.Net.Sockets.SocketException, ex.GetType().FullName);
@@ -136,9 +134,7 @@ public class MapasRepositoryTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
         {
-            await foreach (var _ in repo.ListarPorIdAsync(id, ColunaMapa.Graphy, cts.Token))
-            {
-            }
+            await repo.ObterPorIdAsync(id, ColunaMapa.Graphy, cts.Token);
         });
     }
 

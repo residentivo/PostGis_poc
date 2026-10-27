@@ -60,15 +60,12 @@ public class IntegracaoBancoTests
         await using var _ = ds;
         Assert.True(IdMapa.TentarCriar(IdTeste, out var id));
 
-        var itens = new List<GeometriaMapa>();
-        await foreach (var g in repo.ListarPorIdAsync(id, coluna, CancellationToken.None))
+        // D-N7: uma geometria por id. Com a migracao aplicada nunca ha 2 linhas (RS-23).
+        var leitura = await repo.ObterPorIdAsync(id, coluna, CancellationToken.None);
+        Assert.IsNotType<LeituraMapa.Duplicada>(leitura);
+        if (leitura is LeituraMapa.Encontrada encontrada)
         {
-            itens.Add(g);
-        }
-
-        Assert.True(itens.Count <= 101);
-        foreach (var g in itens)
-        {
+            var g = encontrada.Geometria;
             Assert.False(string.IsNullOrWhiteSpace(g.Tipo));
             Assert.False(string.IsNullOrWhiteSpace(g.Wkt));
             using var doc = JsonDocument.Parse(g.GeoJson);
@@ -90,13 +87,9 @@ public class IntegracaoBancoTests
         await using var _ = ds;
         IdMapa.TentarCriar("2147483647", out var id);
 
-        var quantidade = 0;
-        await foreach (var _g in repo.ListarPorIdAsync(id, coluna, CancellationToken.None))
-        {
-            quantidade++;
-        }
+        var leitura = await repo.ObterPorIdAsync(id, coluna, CancellationToken.None);
 
-        Assert.Equal(0, quantidade);
+        Assert.Same(LeituraMapa.NaoEncontrada.Instancia, leitura);
     }
 
     [TheoryIntegracao]

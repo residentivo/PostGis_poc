@@ -1,15 +1,17 @@
 namespace ApiMapas.Dominio;
 
 /// <summary>
-/// Leitura (somente SELECT) das geometrias de public.mapas por id.
+/// Leitura (somente SELECT) de UMA geometria de public.mapas por id (D-N7).
 /// Contrato do dominio; a implementacao Npgsql fica em ApiMapas.Infraestrutura.
 /// </summary>
 public interface IMapasRepository
 {
     /// <summary>
-    /// Devolve, em fluxo, as linhas nao nulas da coluna para o id (no maximo 101 - LIMIT 101
-    /// das consultas de referencia). Cada chamada usa sua propria conexao, liberada quando a
-    /// enumeracao termina ou e interrompida.
+    /// Le a linha do id (consultas Q1/Q2 com LIMIT 2 - RS-23) numa conexao propria, liberada ao
+    /// final. Devolve <see cref="LeituraMapa.NaoEncontrada"/> (0 linhas),
+    /// <see cref="LeituraMapa.ColunaVazia"/> (1 linha com a coluna NULL),
+    /// <see cref="LeituraMapa.Duplicada"/> (2 linhas: migracao nao aplicada) ou
+    /// <see cref="LeituraMapa.Encontrada"/>.
     /// </summary>
-    IAsyncEnumerable<GeometriaMapa> ListarPorIdAsync(IdMapa id, ColunaMapa coluna, CancellationToken cancellationToken);
+    Task<LeituraMapa> ObterPorIdAsync(IdMapa id, ColunaMapa coluna, CancellationToken cancellationToken);
 }

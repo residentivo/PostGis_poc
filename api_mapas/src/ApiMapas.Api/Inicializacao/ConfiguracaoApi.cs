@@ -13,6 +13,8 @@ public sealed class ConfiguracaoApi
     public const string ChaveVerboso = "Verboso";
     public const string ChaveLimiteBytes = OpcoesConsulta.Secao + ":LimiteBytesGeometrias";
     public const string ChaveLimiteRequisicoes = OpcoesConsulta.Secao + ":LimiteRequisicoesPorMinuto";
+    public const string ChaveLimiteBytesCorpoPut = OpcoesConsulta.Secao + ":LimiteBytesCorpoPut";
+    public const string ChaveLimiteEscritas = OpcoesConsulta.Secao + ":LimiteEscritasPorMinuto";
 
     /// <summary>REC-A1: 60 requisicoes por minuto por IP.</summary>
     public const int LimiteRequisicoesPadrao = 60;
@@ -20,11 +22,13 @@ public sealed class ConfiguracaoApi
     /// <summary>Porta/URL padrao quando nada for configurado (contrato A1).</summary>
     public const string UrlPadrao = "http://localhost:5080";
 
-    private ConfiguracaoApi(bool verboso, long limiteBytes, int limiteRequisicoes)
+    private ConfiguracaoApi(bool verboso, long limiteBytes, int limiteRequisicoes, long limiteBytesCorpoPut, int limiteEscritas)
     {
         Verboso = verboso;
         LimiteBytesGeometrias = limiteBytes;
         LimiteRequisicoesPorMinuto = limiteRequisicoes;
+        LimiteBytesCorpoPut = limiteBytesCorpoPut;
+        LimiteEscritasPorMinuto = limiteEscritas;
     }
 
     /// <summary>Liga os logs de passo (nivel Debug) das categorias ApiMapas.*.</summary>
@@ -33,6 +37,12 @@ public sealed class ConfiguracaoApi
     public long LimiteBytesGeometrias { get; }
 
     public int LimiteRequisicoesPorMinuto { get; }
+
+    /// <summary>D-N9 / RP-6: teto do corpo do PUT e do POST, 1..1048576 bytes (padrao 65536). A chave mantem o nome.</summary>
+    public long LimiteBytesCorpoPut { get; }
+
+    /// <summary>D-N9 / RP-6: escritas (PUT e POST somados) por minuto, por IP e na API toda, 1..60 (padrao 10); soma-se ao limite global.</summary>
+    public int LimiteEscritasPorMinuto { get; }
 
     public static ConfiguracaoApi Carregar(IConfiguration configuracao)
     {
@@ -52,10 +62,36 @@ public sealed class ConfiguracaoApi
             throw new ConfiguracaoInvalidaException(ChaveLimiteRequisicoes, "e grande demais");
         }
 
-        return new ConfiguracaoApi(verboso, limiteBytes, (int)limiteRequisicoes);
+        // RP-6: fora da faixa, a API sai com codigo 1.
+        var limiteBytesCorpoPut = LerInteiroNaFaixa(configuracao, ChaveLimiteBytesCorpoPut,
+            OpcoesAtualizacao.LimiteBytesCorpoPadrao, 1, OpcoesAtualizacao.LimiteBytesCorpoMaximo);
+        var limiteEscritas = LerInteiroNaFaixa(configuracao, ChaveLimiteEscritas,
+            OpcoesAtualizacao.LimiteEscritasPorMinutoPadrao, 1, OpcoesAtualizacao.LimiteEscritasPorMinutoMaximo);
+
+        return new ConfiguracaoApi(verboso, limiteBytes, (int)limiteRequisicoes, limiteBytesCorpoPut, (int)limiteEscritas);
     }
 
     public OpcoesConsulta CriarOpcoesConsulta() => new() { LimiteBytesGeometrias = LimiteBytesGeometrias };
+
+    public OpcoesAtualizacao CriarOpcoesAtualizacao() => new() { LimiteBytesCorpo = LimiteBytesCorpoPut };
+
+    private static long LerInteiroNaFaixa(IConfiguration configuracao, string chave, long padrao, long minimo, long maximo)
+    {
+        var texto = configuracao[chave];
+        if (string.IsNullOrWhiteSpace(texto))
+        {
+            return padrao;
+        }
+
+        if (!long.TryParse(texto.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out var valor)
+            || valor < minimo || valor > maximo)
+        {
+            throw new ConfiguracaoInvalidaException(chave,
+                $"deve ser um inteiro entre {minimo.ToString(CultureInfo.InvariantCulture)} e {maximo.ToString(CultureInfo.InvariantCulture)}");
+        }
+
+        return valor;
+    }
 
     private static long LerInteiroPositivo(IConfiguration configuracao, string chave, long padrao)
     {

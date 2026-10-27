@@ -57,7 +57,7 @@ public class ApiEmMemoriaTests
     [InlineData("metry", ColunaMapa.Metry)]
     public async Task Get200_JsonCamelCase_GeojsonObjeto(string coluna, ColunaMapa enumColuna)
     {
-        var repo = new RepositorioFalso(new[] { Geometrias.Ponto(), Geometrias.Poligono() });
+        var repo = new RepositorioFalso(new[] { Geometrias.Ponto() });
         await using var f = new ApiFactory(repo);
 
         var (r, corpo) = await GetAsync(f, $"/api/mapas/123/{coluna}");
@@ -66,37 +66,29 @@ public class ApiEmMemoriaTests
         Assert.Equal("application/json", r.Content.Headers.ContentType?.MediaType);
         AssertCabecalhosSeguranca(r);
         var json = JsonDocument.Parse(corpo).RootElement;
-        Assert.Equal(new[] { "id", "coluna", "quantidade", "truncado", "geometrias" }, json.EnumerateObject().Select(p => p.Name));
+
+        // D-N7 / Q2: objeto unico, sem quantidade, truncado nem lista.
+        Assert.Equal(new[] { "id", "coluna", "tipo", "srid", "wkt", "geojson", "x", "y", "longitude", "latitude" }, json.EnumerateObject().Select(p => p.Name));
         Assert.Equal(123, json.GetProperty("id").GetInt32());
         Assert.Equal(coluna, json.GetProperty("coluna").GetString());
-        Assert.Equal(2, json.GetProperty("quantidade").GetInt32());
-        Assert.False(json.GetProperty("truncado").GetBoolean());
-
-        var ponto = json.GetProperty("geometrias")[0];
-        Assert.Equal(new[] { "tipo", "srid", "wkt", "geojson", "x", "y", "longitude", "latitude" }, ponto.EnumerateObject().Select(p => p.Name));
-        Assert.Equal(JsonValueKind.Object, ponto.GetProperty("geojson").ValueKind);
-        Assert.Equal("Point", ponto.GetProperty("geojson").GetProperty("type").GetString());
-        Assert.Equal(-46.633309, ponto.GetProperty("longitude").GetDouble());
-
-        var poligono = json.GetProperty("geometrias")[1];
-        Assert.Equal(JsonValueKind.Null, poligono.GetProperty("x").ValueKind);
-        Assert.Equal(JsonValueKind.Null, poligono.GetProperty("latitude").ValueKind);
+        Assert.Equal(JsonValueKind.Object, json.GetProperty("geojson").ValueKind);
+        Assert.Equal("Point", json.GetProperty("geojson").GetProperty("type").GetString());
+        Assert.Equal(-46.633309, json.GetProperty("longitude").GetDouble());
         Assert.Equal((123, enumColuna), (repo.Pedidos.Single().Id.Valor, repo.Pedidos.Single().Coluna));
     }
 
     [Fact]
-    public async Task Get200_Truncado101Itens()
+    public async Task Get200_Poligono_CoordenadasNulas()
     {
-        await using var f = new ApiFactory(new RepositorioFalso(Geometrias.Pontos(101)));
+        await using var f = new ApiFactory(new RepositorioFalso(new[] { Geometrias.Poligono() }));
 
         var (r, corpo) = await GetAsync(f, "/api/mapas/2147483647/metry");
 
         Assert.Equal(HttpStatusCode.OK, r.StatusCode);
         var json = JsonDocument.Parse(corpo).RootElement;
         Assert.Equal(2147483647, json.GetProperty("id").GetInt32());
-        Assert.Equal(100, json.GetProperty("quantidade").GetInt32());
-        Assert.Equal(100, json.GetProperty("geometrias").GetArrayLength());
-        Assert.True(json.GetProperty("truncado").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("x").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("latitude").ValueKind);
     }
 
     // ---------------- 400 ----------------
@@ -128,8 +120,10 @@ public class ApiEmMemoriaTests
         var bruto = Uri.UnescapeDataString(idUrl);
         if (bruto.Trim().Length >= 3)
         {
-            Assert.DoesNotContain(bruto, corpo, StringComparison.Ordinal);
-            Assert.DoesNotContain(idUrl, corpo, StringComparison.Ordinal);
+            // O traceId e hexadecimal aleatorio (pode conter "abc" por acaso): fica fora da comparacao.
+            var semTraceId = corpo.Replace(json.GetProperty("traceId").GetString()!, string.Empty, StringComparison.Ordinal);
+            Assert.DoesNotContain(bruto, semTraceId, StringComparison.Ordinal);
+            Assert.DoesNotContain(idUrl, semTraceId, StringComparison.Ordinal);
         }
 
         Assert.Equal(0, repo.Chamadas);

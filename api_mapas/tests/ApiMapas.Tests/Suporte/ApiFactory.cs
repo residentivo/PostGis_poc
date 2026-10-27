@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace ApiMapas.Tests.Suporte;
@@ -38,6 +39,24 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         Environment.SetEnvironmentVariable("PG_HOST", "127.0.0.1");
         Environment.SetEnvironmentVariable("PG_PORT", "1");
         Environment.SetEnvironmentVariable("PG_SSLMODE", null);
+
+        // Escrita (PUT) desligada por padrao nos testes, independente do ambiente da maquina.
+        Environment.SetEnvironmentVariable("PG_ESCRITA_USER", null);
+        Environment.SetEnvironmentVariable("PG_ESCRITA_PASSWORD", null);
+    }
+
+    /// <summary>
+    /// O Program le as variaveis PG_* do processo durante a montagem do host. A trava impede que
+    /// uma fabrica com escrita (<see cref="ApiEscritaFactory"/>) troque as variaveis no meio da
+    /// montagem desta.
+    /// </summary>
+    protected override IHost CreateHost(IHostBuilder builder)
+    {
+        lock (TravaAmbiente.Trava)
+        {
+            DefinirVariaveisFicticias();
+            return base.CreateHost(builder);
+        }
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -50,4 +69,10 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             servicos.AddScoped(_ => Repositorio);
         });
     }
+}
+
+/// <summary>Trava unica para trocar as variaveis PG_* do processo durante a montagem do host.</summary>
+public static class TravaAmbiente
+{
+    public static readonly object Trava = new();
 }

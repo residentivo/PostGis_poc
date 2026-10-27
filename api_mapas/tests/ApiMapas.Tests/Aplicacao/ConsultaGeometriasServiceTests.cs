@@ -45,7 +45,7 @@ public class ConsultaGeometriasServiceTests
         }
     }
 
-    // ---------- 404 / 200 / truncado por itens ----------
+    // ---------- 404 / 200 / 500 (uma geometria por id - D-N7, RS-23) ----------
 
     [Theory]
     [InlineData(ColunaMapa.Graphy, "graphy")]
@@ -64,47 +64,62 @@ public class ConsultaGeometriasServiceTests
         Assert.Equal((15, coluna), (repo.Pedidos[0].Id.Valor, repo.Pedidos[0].Coluna));
     }
 
-    [Theory]
-    [InlineData(1, 1, false)]
-    [InlineData(2, 2, false)]
-    [InlineData(99, 99, false)]
-    [InlineData(100, 100, false)]
-    [InlineData(101, 100, true)]
-    [InlineData(150, 100, true)]
-    public async Task Quantidade_RespeitaLimiteDe100Itens(int noBanco, int esperado, bool truncado)
+    [Fact]
+    public async Task ColunaVazia_DevolveNaoEncontrado()
     {
-        var (servico, _) = Criar(new RepositorioFalso(Geometrias.Pontos(noBanco)));
+        var (servico, log) = Criar(RepositorioFalso.ColunaVazia());
+
+        var resultado = await servico.ConsultarAsync("15", ColunaMapa.Metry, CancellationToken.None);
+
+        Assert.Equal(new ResultadoConsulta.NaoEncontrado(15, "metry"), resultado);
+        Assert.Contains(log.Entradas, e => e.Evento.Id == 1010 && e.Nivel == LogLevel.Debug);
+    }
+
+    [Fact]
+    public async Task UmaLinha_DevolveObjetoUnico()
+    {
+        var (servico, _) = Criar(new RepositorioFalso(Geometrias.Pontos(1)));
 
         var resultado = await servico.ConsultarAsync("1", ColunaMapa.Metry, CancellationToken.None);
 
         var resposta = Assert.IsType<ResultadoConsulta.Sucesso>(resultado).Resposta;
         Assert.Equal(1, resposta.Id);
         Assert.Equal("metry", resposta.Coluna);
-        Assert.Equal(esperado, resposta.Quantidade);
-        Assert.Equal(esperado, resposta.Geometrias.Count);
-        Assert.Equal(truncado, resposta.Truncado);
+        Assert.Equal("POINT", resposta.Tipo);
     }
 
-    // ---------- teto de bytes ----------
+    [Fact]
+    public async Task DuasLinhas_LeituraInconsistente_LogError()
+    {
+        var (servico, log) = Criar(new RepositorioFalso(Geometrias.Pontos(2)));
+
+        await Assert.ThrowsAsync<LeituraInconsistenteException>(
+            () => servico.ConsultarAsync("4", ColunaMapa.Graphy, CancellationToken.None));
+
+        Assert.Contains(log.Entradas, e => e.Evento.Id == 1004 && e.Nivel == LogLevel.Error);
+    }
+
+    // ---------- teto de bytes (item) ----------
 
     [Theory]
-    // limite, tamanhos (bytes de wkt; geojson "{}" soma 2), quantidade esperada, truncado
-    [InlineData(10, new[] { 8 }, 1, false)]            // 8+2 = 10 = limite: cabe
-    [InlineData(10, new[] { 9 }, 0, true)]             // 1o item sozinho estoura: 200 vazio truncado
-    [InlineData(20, new[] { 8, 8 }, 2, false)]         // 20 exatos
-    [InlineData(20, new[] { 8, 9 }, 1, true)]          // 2o estoura
-    [InlineData(30, new[] { 8, 30, 1 }, 1, true)]      // depois de estourar, nao pula para os menores
-    public async Task TetoDeBytes_TruncaNoItemQueEstoura(long limite, int[] tamanhos, int esperado, bool truncado)
+    // limite, bytes de wkt (geojson "{}" soma 2), cabe
+    [InlineData(10, 8, true)]
+    [InlineData(10, 9, false)]
+    public async Task TetoDeBytes_AcimaDoTeto_LeituraInconsistente_Warning(long limite, int tamanho, bool cabe)
     {
-        var (servico, log) = Criar(new RepositorioFalso(tamanhos.Select(Geometrias.ComTamanho)), limite);
+        var (servico, log) = Criar(new RepositorioFalso(new[] { Geometrias.ComTamanho(tamanho) }), limite);
 
-        var resultado = await servico.ConsultarAsync("3", ColunaMapa.Graphy, CancellationToken.None);
+        if (cabe)
+        {
+            Assert.IsType<ResultadoConsulta.Sucesso>(await servico.ConsultarAsync("3", ColunaMapa.Graphy, CancellationToken.None));
+        }
+        else
+        {
+            await Assert.ThrowsAsync<LeituraInconsistenteException>(
+                () => servico.ConsultarAsync("3", ColunaMapa.Graphy, CancellationToken.None));
+        }
 
-        var resposta = Assert.IsType<ResultadoConsulta.Sucesso>(resultado).Resposta;
-        Assert.Equal(esperado, resposta.Quantidade);
-        Assert.Equal(esperado, resposta.Geometrias.Count);
-        Assert.Equal(truncado, resposta.Truncado);
-        Assert.Equal(truncado, log.Entradas.Any(e => e.Evento.Id == 1005 && e.Nivel == LogLevel.Warning));
+        Assert.Equal(!cabe, log.Entradas.Any(e => e.Evento.Id == 1005 && e.Nivel == LogLevel.Warning));
     }
 
     [Fact]
@@ -114,11 +129,8 @@ public class ConsultaGeometriasServiceTests
         var g = new GeometriaMapa("POINT", 4326, "éééé", "{}", null, null, null, null);
         var (servico, _) = Criar(new RepositorioFalso(new[] { g }), 9);
 
-        var resposta = Assert.IsType<ResultadoConsulta.Sucesso>(
-            await servico.ConsultarAsync("1", ColunaMapa.Graphy, CancellationToken.None)).Resposta;
-
-        Assert.True(resposta.Truncado);
-        Assert.Empty(resposta.Geometrias);
+        await Assert.ThrowsAsync<LeituraInconsistenteException>(
+            () => servico.ConsultarAsync("1", ColunaMapa.Graphy, CancellationToken.None));
     }
 
     // ---------- mapeamento ----------
@@ -131,7 +143,7 @@ public class ConsultaGeometriasServiceTests
         var resposta = Assert.IsType<ResultadoConsulta.Sucesso>(
             await servico.ConsultarAsync("1", ColunaMapa.Graphy, CancellationToken.None)).Resposta;
 
-        var item = Assert.Single(resposta.Geometrias);
+        var item = resposta;
         Assert.Equal("POINT", item.Tipo);
         Assert.Equal(4326, item.Srid);
         Assert.Equal(JsonValueKind.Object, item.Geojson.ValueKind);
@@ -205,13 +217,11 @@ public class ConsultaGeometriasServiceTests
 
     // ---------- erros e cancelamento ----------
 
-    [Theory]
-    [InlineData(0)]
-    [InlineData(2)]
-    public async Task ErroDoRepositorio_Propaga_ELogaSoOTipo(int aposItens)
+    [Fact]
+    public async Task ErroDoRepositorio_Propaga_ELogaSoOTipo()
     {
         var erro = new TimeoutException("detalhe interno host=10.0.0.1 password=xyz");
-        var (servico, log) = Criar(RepositorioFalso.QueLanca(erro, aposItens, Geometrias.Pontos(5)));
+        var (servico, log) = Criar(RepositorioFalso.QueLanca(erro));
 
         var ex = await Assert.ThrowsAsync<TimeoutException>(
             () => servico.ConsultarAsync("2", ColunaMapa.Metry, CancellationToken.None));
@@ -227,7 +237,7 @@ public class ConsultaGeometriasServiceTests
     {
         using var cts = new CancellationTokenSource();
         await cts.CancelAsync();
-        var (servico, log) = Criar(new RepositorioFalso(Geometrias.Pontos(3)));
+        var (servico, log) = Criar(new RepositorioFalso(Geometrias.Pontos(1)));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => servico.ConsultarAsync("2", ColunaMapa.Graphy, cts.Token));
@@ -286,14 +296,13 @@ public class ConsultaGeometriasServiceTests
     public void OpcoesConsulta_Padroes()
     {
         Assert.Equal("ApiMapas", OpcoesConsulta.Secao);
-        Assert.Equal(100, OpcoesConsulta.LimiteItens);
         Assert.Equal(5L * 1024 * 1024, new OpcoesConsulta().LimiteBytesGeometrias);
     }
 
     [Fact]
     public async Task ServicoComNullLogger_Funciona()
     {
-        var servico = new ConsultaGeometriasService(new RepositorioFalso(Geometrias.Pontos(2)), new OpcoesConsulta(), NullLogger<ConsultaGeometriasService>.Instance);
+        var servico = new ConsultaGeometriasService(new RepositorioFalso(Geometrias.Pontos(1)), new OpcoesConsulta(), NullLogger<ConsultaGeometriasService>.Instance);
 
         var r = await servico.ConsultarAsync("1", ColunaMapa.Graphy, CancellationToken.None);
 

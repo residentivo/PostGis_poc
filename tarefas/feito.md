@@ -432,3 +432,714 @@ Informadas pelo usuário; os agentes não executaram nada no servidor.
 - **A7.3 - API com o banco real**: o usuário testou a `api_mapas` com a senha nova e funcionou.
 - **Ação 5 - Habilitar SSL (S-3)**: o usuário executou o script do banco que liga o SSL. Com isso, a exceção `PG_SSLMODE=Disable` deixou de ser necessária e foi retirada do Kanban.
 - **F6.6 e M6.6 - Inserção em `graphy` e `metry`**: os programas inseriram os dados com sucesso no banco real. A revalidação de privilégios ligada a essas execuções também saiu de `afazer.md`.
+
+---
+
+## Pedido (2026-10-22): PUT para `/api/mapas/{id}/graphy` e `/api/mapas/{id}/metry` (`api_mapas`)
+
+### P1 - Planejamento por camada
+- Responsável: analista (SubBrain)
+- Concluído em: 2026-10-22
+- O que foi gerado (detalhado em `afazer.md`, seção do pedido):
+  - Contrato do PUT, no mesmo padrão do A1:
+    - Rotas `PUT /api/mapas/{id}/graphy|metry` e corpo `{"geometrias":[{"wkt","srid"}]}`.
+    - Respostas 204, 400 (`Id inválido` / `Corpo inválido` / `Geometria inválida` com índice), 404, 405, 409, 413, 415, 429 e 500 em ProblemDetails com textos fixos.
+    - Ordem das verificações e regra do `instance`: modelo da rota no 400/413/415; id validado no 404/409.
+  - Decisões D-P1 a D-P10:
+    - UPDATE NULL quando a outra coluna está preenchida e DELETE quando ela está nula; INSERT de linhas novas com o id explícito.
+    - Lista vazia aceita (limpa a coluna); id sem linhas responde 404.
+    - Limites: 100 itens, 10.000 caracteres por WKT, 1 MiB de corpo, `MaxDepth` 8, 10 PUT/min.
+    - SRIDs por coluna e tipos 2D aceitos.
+    - Concorrência por `pg_advisory_xact_lock` por id, com `lock_timeout` de 5 s (estouro responde 409).
+    - `WktValidator` no Domínio da API (port do `teste_metry`).
+    - Sucesso responde 204.
+    - Conexão `PG_ESCRITA_*` opcional: sem ela o PUT fica desligado e responde 405.
+    - Nenhuma autenticação nova; a decisão fica para o SecBrain avaliar.
+  - Critérios de aceite CP-1 a CP-12. Subtarefas P2.1–P2.10 (security), P3.1–P3.5 (database), P4.1–P4.7 (backend), P6.1–P6.7 (qa) e P7.1–P7.5 (fechamento).
+  - Frontend fora do escopo.
+  - [x] P1
+
+### P2 - Revisão de segurança do plano
+- Responsável: security (SecBrain)
+- Concluído em: 2026-10-22, **APROVADO COM REQUISITOS**
+- O que foi gerado:
+  - Requisitos obrigatórios RP-1 a RP-17, distribuídos pelo SubBrain nas subtarefas P3.x, P4.x, P6.x e P7.x de `afazer.md`.
+  - Recomendações R-1 a R-5. R-1 (desligar a escrita se a role for superusuário, tiver `BYPASSRLS` ou `CREATEROLE`), R-2 (no máximo 3 PUT simultâneos, com 429), R-3 e R-5 foram incluídas. R-4 (CHECK de SRID) continua opcional e fora do escopo.
+  - Decisões do usuário registradas como fechadas:
+    - U-1: sem autenticação, com as condições do P2.5 no README.
+    - U-2: risco do DELETE na tabela inteira aceito, com controles compensatórios e sem `SECURITY DEFINER`.
+    - U-3: lista vazia responde 204, com log Warning.
+    - U-4: script de backup em `database/`, executado pelo usuário antes de definir `PG_ESCRITA_*`.
+  - Decisão do SubBrain D-P11: o estouro do prazo de 30 s (RP-4) responde 500 genérico, igual ao CA-4, ao `57014` e ao pool esgotado.
+  - R-3 (P6.5: ids de teste criados com `mapas_teste`; `api_mapas_escrita` sem TRUNCATE, sem sequência e sem INSERT/UPDATE fora das colunas concedidas) e R-5 (P6.3: 499/cancelamento no meio da transação com ROLLBACK confirmado) foram transcritas e encaixadas no P6.
+  - [x] P2
+
+### P3 - Role de escrita, backup e SQL de referência
+- Responsável: database (DataBrain)
+- Concluído em: 2026-10-22. Nada foi executado no servidor; os passos do servidor ficam com o usuário/DBA (P3.5).
+- O que foi gerado:
+  - [x] P3.1 `database/roles.sql`, revisão 4: role `api_mapas_escrita` (RP-1, RP-3).
+    - Criada sem senha, com `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT 5`.
+    - Sessão: `RESET ALL`, `statement_timeout` 15s, `lock_timeout` 5s, `idle_in_transaction_session_timeout` 30s, `client_min_messages` warning; `transaction_timeout` 30s só no PG 17+.
+    - Privilégios: `CONNECT`, `USAGE` no schema; em `public.mapas`, `SELECT (id, graphy, metry)`, `UPDATE (graphy, metry)`, `INSERT (id, graphy, metry)` e `DELETE`. Nada na sequência.
+    - A role entrou nas guardas C2 (membership, configuração residual, `pg_shdepend`).
+    - Nova autoconferência 4.5, antes do COMMIT: aborta se os privilégios efetivos de `api_mapas_leitura` e `api_mapas_escrita` (inclusive via PUBLIC) não forem exatamente os esperados.
+    - Conferências: 5.4 e 5.5 com a matriz por coluna, 5.5b (leitura sem escrita), 5.6 (sequência USAGE/SELECT/UPDATE), 5.7 a 5.9 com a role nova, 5.10 (colunas), 5.11 (EXECUTE das funções de W1/W2) e 5.12 (advisory locks da classe do PUT).
+    - Variável `psql -v pular_ssl=1` para pular a seção 7 (SSL já ligado).
+  - [x] P3.2 Guarda 0.1 (RP-2/CP-15): aborta se `public.mapas` tiver colunas além de `id`, `graphy` e `metry`, se faltar alguma ou se os tipos não forem `int4`/`geography`/`geometry`.
+  - [x] P3.3 `api_mapas/sql/consultas_referencia.sql`, blocos W1.V/W2.V (validação em lote) e W1.1–W1.6/W2.1–W2.6 (transação), com os predicados exatos e o INSERT via `unnest ... WITH ORDINALITY`.
+    - Classe do advisory lock: **1296125011** (0x4D414C53, "MALS" em ASCII; corrigido no D-1 do P6), por id, a mesma para W1 e W2.
+  - [x] P3.4 O comentário do bloco histórico de role aponta `database/roles.sql` como fonte oficial das três roles.
+  - [x] P3.5 `database/README.md`: seção "Procedimento do DBA para ligar o PUT" (backup → `roles.sql` → `\password` → `pg_hba` `hostssl` `/32` + `reject` → conferência → `PG_ESCRITA_*`). Manual atualizado com a role nova, o risco U-2, a guarda RP-2 e os scripts de backup.
+  - [x] P3.6 `database/backup_mapas.sh` (Git Bash/Linux; modo TCP com `sslmode=require` ou modo `--container`) e `database/backup_mapas.ps1` (PowerShell 5.1/7, modo TCP).
+    - Nenhuma credencial; a senha vem de `PGPASSWORD`, `.pgpass` ou do prompt.
+    - Saída datada fora do OneDrive e do git. Código diferente de zero se o dump falhar, vier vazio ou sem `COPY`/rodapé, e o parcial é removido.
+    - O cabeçalho traz a restauração.
+- Validação local (container `postgis/postgis:17-3.5` descartável, nunca o servidor):
+  - `roles.sql` rodou 2x sem erro e abortou com coluna extra e com GRANT a PUBLIC.
+  - W1/W2 com o texto exato deram os contadores esperados de D-P1; id inexistente teve EXISTS = f; o lock ocupado deu `55P03` em cerca de 5 s.
+  - Os dois scripts de backup e a restauração funcionaram.
+- Pontos levados ao SubBrain: ordem por `ctid` (CP-1/CP-2) e `casaos` como role do backup (detalhes na entrega).
+
+### P4 - Implementação dos PUT na API
+- Responsável: backend (BackBrain)
+- Concluído em: 2026-10-22. `dotnet build` com 0 erros e 0 avisos; nenhum pacote vulnerável (diretos e transitivos); os 284 testes existentes continuam verdes (3 de integração opt-in ignorados). Testes novos ficam com o QA (P6).
+- O que foi gerado:
+  - [x] P4.1 Domínio (`ApiMapas.Dominio/Geometrias/`): `WktValidator` (port estático do `teste_metry`, sem log, mensagens fixas só com posição/`U+XXXX`/constantes), `LimitesSrid`/`FaixaSrid`, `PoliticaSridColuna` (graphy 4326; metry 4326/4674/3857/31983), `GeometriaEntrada.TentarCriar` (SRID antes das faixas, RP-14), `MotivosGeometria`, `LimitesEscrita.LimiteGeometriasPut = 100`. Na raiz: `IMapasEscritaRepository` e `ResultadoSubstituicao`.
+  - [x] P4.2 Aplicação: `IAtualizacaoGeometriasService`/`AtualizacaoGeometriasService`, `ResultadoAtualizacao` (Sucesso, IdInvalido, TipoMidiaNaoSuportado, CorpoMuitoGrande, CorpoInvalido, GeometriaInvalida, NaoEncontrado, Conflito), `ILeitorCorpo`/`LeituraCorpo`, `OpcoesAtualizacao`, DTOs com `required` e `JsonSerializerOptions` de RP-11. Prazo de 30 s ligado ao `RequestAborted` (`PrazoAtualizacaoEstouradoException` → 500). Logs 4101–4114: auditoria Information, lista vazia Warning, sem WKT/corpo/`JsonException`.
+  - [x] P4.3 Infraestrutura: `ConexaoEscritaConfig` (`PG_ESCRITA_*`, pool 5, `ApiMapas.Escrita`, RP-7/RP-8), `FonteDadosEscrita` (pool separado), `MapasEscritaRepository` (W1/W2 copiados literalmente, conferidos por script; `NpgsqlBatch` de validação com índice pelo `BatchCommand`; transação READ COMMITTED; `55P03` → Conflito; contagem do INSERT conferida; ROLLBACK em qualquer falha/cancelamento; `FalhaBancoEscritaException` sem a exceção original), `VerificadorRoleEscrita` (R-1).
+  - [x] P4.4 API: `MapPut` nas duas rotas só com a escrita habilitada; `LeitorCorpoHttp` (415 RP-12, 413 por `Content-Length`, contador próprio e `BadHttpRequestException`); ProblemDetails novos em `ProblemasApi`; limitador encadeado (global 60/min + 10 PUT/min por IP + 3 PUT simultâneos), todos 429.
+  - [x] P4.5 Configuração: `ApiMapas:LimiteBytesCorpoPut` (1..1048576) e `ApiMapas:LimiteEscritasPorMinuto` (1..60) com código 1 fora da faixa; logs 4006–4010 (habilitada/desligada com motivo/escrita sem autenticação).
+  - [x] P4.6 RP-9: `.vscode/launch.json` (configuração nova, `PG_ESCRITA_PASSWORD` como input `password` sem `default`), `.env.example` com placeholders, README da API (seção de configuração da escrita).
+  - [x] P4.7 Build 0/0 e auditoria de pacotes.
+- Verificação local (container `postgis/postgis:17-3.5` descartável em `127.0.0.1`, removido ao final; teste de fumaça temporário apagado): contagens D-P1 corretas, idempotência, outra coluna preservada, 404 sem gravar, `ST_IsValid` falso e XX000 com o índice certo, `55P03` → Conflito em ~5 s, cancelamento no meio da transação com ROLLBACK, R-1 (role comum = habilitada; superusuário = desligada; banco fora = desligada). Na API em memória: 204/400/404/409/413 (com e sem `Content-Length`)/415/429 (4º PUT simultâneo)/500/405 conforme o contrato.
+
+### P5 - Revisão de segurança da implementação
+- Responsável: security (SecBrain)
+- Concluído em: 2026-10-22, **APROVADO COM RESSALVAS** (nenhum achado Crítico ou Alto)
+- O que foi gerado:
+  - Correções C1 a C7 e C9, registradas como P5.C em `afazer.md`:
+    - BackBrain: C1 a C6.
+    - DataBrain: C7 e C9.
+  - C8 (verify-full no backup) foi para a pendência "CA nos clientes para `VerifyFull`".
+  - Decisões (7), (8) e (9) vão para o README no P7.3; a cobertura nova vai para o P6.8.
+  - [x] P5
+
+### P6 - Testes do PUT (qa / TestBrain)
+- Responsável: qa (TestBrain)
+- Concluído em: 2026-10-22. `dotnet build` com 0 erros e 0 avisos. `dotnet test`: 1146 aprovados e 19 ignorados (integração opt-in) no modo padrão; 1179 aprovados e 0 ignorados com `PG_RUN_INTEGRATION=1` contra um `postgis/postgis:17-3.5` descartável em `127.0.0.1:55432` (SSL ligado, `roles.sql` aplicado, container e volumes removidos ao final). Nada rodou contra o servidor do usuário.
+- Cobertura de linhas (coverlet): 99,43% no total de `src` (1751/1761; ramos 97,64%) e 99,25% no código novo ou alterado do PUT (1327/1337; ramos 96,95%). Com o código gerado pelo `LoggerMessage`: 94,51%. As linhas sem cobertura são guardas defensivas que não têm como ser alcançadas (`MapasEscritaRepository` 167-168, 260-261, 300-303; fechamentos de `await using` no `VerificadorRoleEscrita`).
+- O que foi gerado (`api_mapas/tests/ApiMapas.Tests`):
+  - [x] P6.1 `Dominio/WktValidatorTests.cs` e `Dominio/GeometriaEntradaTests.cs`: casos do `teste_metry` portados para os 4 SRIDs; faixas inclusivas em todos os níveis de aninhamento; SRID verificado antes do WKT (RP-14); 100/101 itens e 10.000/10.001 caracteres; mensagens sem eco do WKT.
+  - [x] P6.2 `Aplicacao/AtualizacaoGeometriasServiceTests.cs`: todos os ramos de `ResultadoAtualizacao`, 44 corpos inválidos de RP-11, ordem do contrato (id antes do corpo e do banco), auditoria 4110 e Warning 4108 sem WKT, cancelamento (4113) e prazo (4114 → `PrazoAtualizacaoEstouradoException`).
+  - [x] P6.3 `Api/ApiEscritaTests.cs` (fábrica nova `Suporte/ApiEscritaFactory.cs`): 204, 400 (id, corpo, geometria), 404, 409, 413 (com e sem `Content-Length`, limite exato e 1 MiB), 18 variações de 415, 405 por cada motivo de D-P9, 429 de taxa e de concorrência (sem `Retry-After`), 500 genérico e por prazo, `instance`/`traceId`/`type`, nosniff/no-store, RP-12 (Host, OPTIONS com Origin, POST, PATCH, DELETE e method override). Pilha completa com o repositório real sobre o protocolo falso, incluindo o R-5 (cliente desconecta no meio da transação → ROLLBACK, sem COMMIT).
+  - [x] P6.4 `Infraestrutura/MapasEscritaRepositoryTests.cs`, `Infraestrutura/ConexaoEscritaConfigTests.cs` e o mock `Suporte/ServidorPostgresEscritaFalso.cs` (protocolo v3 com lote, transação I/T/E, CancelRequest e queda de conexão): W1/W2 idênticos a `consultas_referencia.sql`, ordem exata da transação, OIDs dos parâmetros, `55P03` → Conflito, `57014`/permissão/pool esgotado/banco fora → 500 com ROLLBACK e log só com SqlState, checagem R-1 com os 6 critérios (C4) e falhas genéricas (C2).
+  - [x] P6.5 `Integracao/IntegracaoEscritaTests.cs` (opt-in; `PG_ESCRITA_*` e `PG_TESTE_*` novos em `AmbienteOriginal`): CP-1 a CP-5, CP-7, CP-9 (409 em ~5 s; dois PUTs simultâneos nunca se misturam), CP-2 comparado como conjunto, faixa do graphy (o cast para geography não falha com longitude 200; a API recusa antes), CP-14/R-3 (matriz por coluna, sem TRUNCATE, sem privilégio na sequência, sem UPDATE de `id`, leitura sem escrita, tentativas sempre dentro de BEGIN/ROLLBACK) e RP-3/C9 (`SHOW` das configurações). Ids criados e apagados com `mapas_teste`. CP-15 conferido no container: o `roles.sql` aborta com coluna extra, com tipo trocado e com coluna faltando, sem criar role.
+  - [x] P6.6 Postman CLI 1.75.0 contra a API local: a coleção oficial (GET) teve 126/126 asserções aprovadas. Como a coleção ainda não tem PUT (entra no P7.2), rodei uma coleção de verificação só no scratchpad (16 requisições, 42/42 asserções, 0 erros de script).
+  - [x] P6.7 Cobertura acima de 80% (ver acima).
+  - [x] P6.8 `Api/LeitorCorpoHttpTests.cs`: C1 (`Application/JSON`, `APPLICATION/JSON; CHARSET=UTF-8`), C2/C4 (seção acima), C3 (pool de escrita limpo quando a R-1 desliga), C5 em Kestrel real (chunked malformado → 400 "Corpo inválido", corpo lento → 400 com StatusCode 408 no log, cliente que fecha → nunca 500), C6 (bloco do `ArrayPool` devolvido limpo), COMMIT com `CancellationToken.None` e cancelamento antes do COMMIT → ROLLBACK.
+- Ajustes na camada de testes: `Suporte/ApiFactory.cs` (trava `TravaAmbiente` na montagem do host, porque as variáveis `PG_*` são do processo) e correção de um falso positivo intermitente em `ApiEmMemoriaTests` (o `traceId` hexadecimal podia conter "abc").
+- Encaminhado ao SubBrain:
+  - D-1 (Baixa, documentação; backend + database): `MapasEscritaRepository.cs:22`, `consultas_referencia.sql:212` e `roles.sql:813-814` dizem "1296125011 = 0x4D415053 = MAPS". O correto é 1296125011 = 0x4D414C53 ("MALS"); "MAPS" = 0x4D415053 = 1296126035. O valor usado é o mesmo em todos os lugares, então não há impacto funcional.
+  - O-1 (Baixa, defesa em profundidade; backend): `Program.cs:200-205` não protege a chamada da R-1. Se a resolução ou a implementação de `IVerificadorRoleEscrita` lançar exceção, a API não sobe. A implementação atual captura tudo (C2 cumprido), então hoje esse caminho não é alcançável.
+  - O-2 (Informativo): no .NET 10 o `ExceptionHandlerMiddleware` responde 499 sozinho quando a requisição é abortada e não chama o `ManipuladorExcecoes`, por isso o log 3001 não aparece. O cancelamento fica registrado pelos logs 4113 e 2112. O resultado final está correto.
+  - O-3 (Informativo): um erro XX000 dentro da transação faz o Npgsql descartar a conexão. O ROLLBACK não é enviado (fica o log 2114) e o servidor desfaz ao fechar a sessão. É o comportamento previsto pelo código.
+  - Notas para o P7.2: com mais de 10 PUT numa execução, o 11º recebe 429 (limite de 10 PUT/min por IP). Use no máximo 10 PUT por execução ou `--delay-request 7000`. Deixe a lista vazia por último e use um `idEscrita` separado do `id` do GET.
+
+### P5.C - Correções do parecer P5
+- Responsáveis: backend (BackBrain) e database (DataBrain)
+- Concluído em: 2026-10-22
+- O que foi gerado:
+  - [x] C1 (BackBrain): Content-Type comparado com `OrdinalIgnoreCase` em `LeitorCorpoHttp`; o resto do RP-12 continua estrito.
+  - [x] C2 (BackBrain): `VerificadorRoleEscrita` captura qualquer exceção, registra só o tipo e o SqlState e devolve `VerificacaoFalhou`.
+  - [x] C3 (BackBrain): com a escrita desligada pela R-1, o pool de escrita é limpo.
+  - [x] C4 (BackBrain): a R-1 também desliga a escrita com `TRUNCATE` em `public.mapas`, membro de `pg_write_all_data` ou role dona da tabela (`relowner`).
+  - [x] C5 (BackBrain): `BadHttpRequestException` que não é de tamanho responde 400 `Corpo inválido`, sem logar a exceção.
+  - [x] C6 (BackBrain): `ArrayPool.Return` com `clearArray: true`.
+  - [x] C7 (DataBrain): `backup_mapas.sh`/`.ps1` só restringem a permissão de diretório criado pelo próprio script, ou vazio e chamado `backups_postgis`; nos outros casos, abortam.
+  - [x] C9 (DataBrain): `ALTER ROLE api_mapas_escrita SET search_path = public`, com guarda (4.5) e conferência (5.1).
+  - C8 (verify-full no backup): não executado; está na pendência "CA nos clientes para `VerifyFull`" em `afazer.md`.
+
+### P5.1 - Revisão das correções P5.C (opcional)
+- Responsável: security (SecBrain)
+- **Dispensado** em 2026-10-22 pelo coordenador e não executado: todos os achados do P5 eram de severidade Baixa e foram verificados pelos testes do P6 (P6.8).
+
+### Correções dos defeitos do P6
+- Concluído em: 2026-10-22
+  - [x] D-1 (BackBrain e DataBrain, documentação): o comentário da classe do lock agora diz `1296125011 = 0x4D414C53 = "MALS"` em `MapasEscritaRepository.cs`, `consultas_referencia.sql` e `roles.sql`, sem mudança de valor. O SubBrain corrigiu a menção no registro do P3 deste arquivo.
+  - [x] O-1 (BackBrain): a chamada da R-1 em `Program.cs` ganhou try/catch e o log 4011 (Warning, escrita desligada). O TestBrain acrescentou o teste em `tests/`.
+  - O-2 e O-3 (informativas, sem ação): no .NET 10 o 499 é tratado pelo `ExceptionHandlerMiddleware`; um XX000 descarta a conexão e o servidor faz o rollback.
+
+### P7 - Fechamento
+- Responsável: analista (SubBrain)
+- Concluído em: 2026-10-23
+- O que foi gerado:
+  - [x] P7.1 P3, P4, P5, P5.C e P6 em `feito.md`; P5.1 registrado como dispensado; a seção do pedido saiu de `afazer.md` e `fazendo.md` está vazio. O contrato e as decisões ficaram abaixo, como referência.
+  - [x] P7.2 `api_mapas/postman/api_mapas.postman_collection.json`:
+    - Pasta nova `escrita (PUT)` com 15 requisições, sendo 10 PUT (o limite por minuto):
+      - 204 em graphy e em metry, este com `APPLICATION/JSON; CHARSET=UTF-8`;
+      - GETs de conferência comparados como conjunto;
+      - 400 de id, de corpo e de geometria (faixa local e `ST_IsValid`), 404, 413, 415 e POST 405 com method override;
+      - a lista vazia por último, seguida dos GETs que provam a coluna limpa e a outra coluna preservada.
+    - Variável nova `idEscrita`, vazia por padrão. A pasta é pulada (`pm.execution.skipRequest`) se `idEscrita` estiver vazio ou igual a `id`.
+    - Teste da pasta: `problem+json` com `traceId` e sem vazamento.
+    - Exemplos fictícios salvos; sem credenciais.
+    - Validada com o Postman CLI 1.75.0 contra uma API local ligada a um `postgis/postgis:17-3.5` descartável em `127.0.0.1` (SSL, `roles.sql` aplicado, senhas aleatórias descartadas, container removido ao final): 27 requisições e 195 asserções, 0 falhas. Com `idEscrita` vazio, só os 12 GET rodaram e nada foi gravado. Nada rodou contra o servidor do usuário.
+  - [x] P7.3 `api_mapas/README.md`:
+    - Tabela de rotas com o PUT e um aviso no início com as condições do U-1.
+    - Backup como pré-requisito, com a pasta datada `~/backups_postgis/AAAAMMDD_HHMMSS` e a regra de destino dedicado (C7).
+    - Critérios da R-1, incluindo os três da C4, e a decisão (7) sobre a subida de até 15 s.
+    - Seção "Contrato do PUT": requisição, regra UPDATE/DELETE/INSERT, lista vazia, 404 de PUT repetido com lista vazia, ordem por `ctid` não garantida depois de um PUT, concorrência, ordem das verificações, tabela de respostas, decisões (8) e (9), prazo e logs.
+    - Também atualizados: `curl` do PUT, Postman (`idEscrita`, 10 PUT, `--delay-request 7000`), resultados de testes, manual da base e riscos aceitos (U-1, U-2). O aviso antigo de "SSL desligado" foi trocado pela situação de 2026-10-22.
+  - [x] P7.4 `database/README.md` revisado depois da atualização do DataBrain:
+    - linha do `id`: o PUT insere com o id explícito, só para ids existentes;
+    - critérios da R-1 com a C4.
+    - O resto (role nova, U-2, RP-2, scripts de backup, procedimento do DBA) estava de acordo com o entregue.
+  - [x] P7.5 Passos de servidor para ligar o PUT registrados em "Ações do usuário/DBA" de `afazer.md`, na ordem backup → `roles.sql` → `\password` → `pg_hba` → conferência → `PG_ESCRITA_*`.
+  - Manual de telas: não aplicável (sem frontend).
+
+### Contrato do PUT e decisões (referência, implementados)
+
+> Pedido do usuário: "Crie os métodos PUT para os endpoints graphy e metry". Features abertas pelo MegaBrain.
+
+**Decisões do usuário (fechadas, não reabrir):**
+1. **Semântica**: o PUT substitui tudo do id na coluna. Numa única transação, tira a coluna (`graphy` ou `metry`) das linhas existentes do id e grava a lista nova. O PUT é idempotente.
+2. **Corpo**: WKT + SRID por geometria, ex.: `{"geometrias":[{"wkt":"POINT(-46.63 -23.55)","srid":4326}]}`. As regras de validação de `teste_graphy`/`teste_metry` são reaproveitadas.
+3. **Banco**: nova role `api_mapas_escrita` com o mínimo de privilégios em `public.mapas`; conexão separada para o PUT; `api_mapas_leitura` continua só leitura.
+
+**Decisões do usuário sobre o parecer P2 (2026-10-22, fechadas, não reabrir):**
+- **U-1 - Sem autenticação no PUT.** Valem as condições do P2.5, que precisam constar no README:
+  - a máquina tem um único usuário;
+  - a API nunca é exposta por proxy, túnel ou port-forward;
+  - RP-12, RP-13 e RP-16 estão cumpridos.
+- **U-2 - Opção (a): o risco do `DELETE` valer para a tabela inteira foi aceito.** Os controles compensatórios são o `pg_hba` `hostssl` `/32`, o backup (U-4) e o `CONNECTION LIMIT`. Não haverá função `SECURITY DEFINER`.
+- **U-3 - Lista vazia aceita:** responde 204 e limpa a coluna (D-P2 mantido), com log **Warning** (RP-13).
+- **U-4 - Backup antes de ligar o PUT.** O DataBrain escreve um script de backup pronto em `database/` (`pg_dump -t public.mapas`), sem nenhuma credencial no script; a senha vem de `PGPASSWORD`/`.pgpass` ou do prompt. Quem executa é o usuário, **antes** de definir `PG_ESCRITA_*`. Vira pré-requisito no P3 e no README.
+
+**Ordem executada:** P1 analista → P2 security → P3 database → P4 backend → P5 security → P5.C correções → P6 qa → P7 analista. Frontend: fora do escopo (a `api_mapas` não tem frontend).
+
+#### Decisões do SubBrain (D-P1 a D-P11)
+
+- **D-P1 - Como tirar a coluna antiga: UPDATE para NULL ou DELETE, conforme a outra coluna.** Para o PUT de `graphy` (o de `metry` é simétrico):
+  - Linhas do id com `graphy` e `metry` preenchidas: `UPDATE ... SET graphy = NULL` (a `metry` dessa linha é preservada).
+  - Linhas do id com `graphy` preenchida e `metry` nula: `DELETE` (se fossem só zeradas, virariam linhas vazias que se acumulam a cada PUT).
+  - Linhas do id com `graphy` nula não são tocadas, inclusive as que já estavam vazias antes.
+  - As geometrias novas entram como linhas novas: `INSERT (id, graphy)` com o id explícito. A coluna é `GENERATED BY DEFAULT`, então o id explícito é aceito e a sequência não é usada.
+  - A tabela só pode ter `id`, `graphy` e `metry`. Isso agora é uma guarda que aborta o script (RP-2).
+- **D-P2 - Lista vazia (`"geometrias": []`) é aceita e responde 204: limpa a coluna do id** (U-3, com log Warning). Já o corpo sem `geometrias`, com `geometrias: null` ou com raiz que não é objeto responde 400.
+- **D-P3 - Id sem nenhuma linha em `public.mapas` responde 404; o PUT não cria ids.**
+  - Motivo: se um id que a sequência ainda não gerou fosse gravado com valor explícito, um INSERT futuro dos programas de teste receberia o mesmo id e misturaria linhas de origens diferentes (a tabela não tem PK).
+  - Vale qualquer linha do id, em qualquer coluna, inclusive linha vazia. A existência é verificada depois do lock (RP-15).
+  - Idempotência: se um PUT com lista vazia apagar a última linha do id, o próximo PUT igual responde 404. O estado do servidor é o mesmo, que é o que a idempotência do RFC 9110 exige; isso fica documentado no manual.
+- **D-P4 - Limites:**
+  - Até **100** geometrias por PUT, igual ao `OpcoesConsulta.LimiteItens`. Depois do PUT, o GET devolve tudo sem truncar.
+  - WKT com até **10.000** caracteres, como nos programas de teste.
+  - Corpo com até **1 MiB** (1.048.576 bytes), configurável em `ApiMapas:LimiteBytesCorpoPut`. Fora de 1..1048576, a API sai com código 1 (RP-6).
+  - JSON com as opções de RP-11.
+  - Rate limit de escrita de **10 PUT/min por IP**, configurável em `ApiMapas:LimiteEscritasPorMinuto`; fora de 1..60, a API sai com código 1 (RP-6). Ele se soma ao limite global de 60/min.
+  - No máximo **3 PUT simultâneos** na API toda. O excedente responde 429 (R-2).
+  - Prazo total de **30 s** por PUT (RP-4, ver D-P11).
+- **D-P5 - SRIDs e tipos por coluna:**
+  - `graphy`: só **4326**, com longitude em [-180, 180] e latitude em [-90, 90].
+  - `metry`: **4326, 4674, 3857 e 31983**, com as faixas de `teste_metry/.../LimitesSrid.cs`.
+  - O SRID é verificado antes das faixas (RP-14).
+  - O `srid` é obrigatório em todo item, sem valor padrão, e é um inteiro JSON (`NumberHandling Strict`); `"4326"` em texto responde 400.
+  - Tipos aceitos: POINT, LINESTRING, POLYGON, MULTIPOINT, MULTILINESTRING, MULTIPOLYGON e GEOMETRYCOLLECTION. Só 2D, sem EMPTY, sem EWKT e sem HEX/WKB.
+  - Nas duas colunas vale a lista permitida de caracteres do validador do `teste_metry`. Depois, no banco, `ST_IsValid` e `GeometryType` precisam bater com o tipo local.
+- **D-P6 - Concorrência:**
+  - Transação `READ COMMITTED`. Logo depois do `BEGIN` vem `SET LOCAL lock_timeout = '5s'` (RP-3) e em seguida `SELECT pg_advisory_xact_lock(<classe>::int4, @id::int4)`.
+  - A classe é uma constante incomum e documentada (RP-15). O lock é por id, porque os PUTs de `graphy` e de `metry` mexem nas mesmas linhas.
+  - `55P03` responde 409.
+  - A ordem na transação é: `BEGIN` → `SET LOCAL lock_timeout` → lock → existência do id (404 → ROLLBACK) → UPDATE NULL → DELETE → INSERT (`unnest(@wkts::text[], @srids::int[]) WITH ORDINALITY`, na ordem do corpo) → COMMIT.
+  - A validação no banco (`ST_IsValid`/`GeometryType`) roda antes de abrir a transação, na mesma conexão de escrita. O recomendado é um único `NpgsqlBatch` com um comando por item (RP-4). Um erro do PostGIS vira 400 com o índice do item.
+  - O GET não usa o lock e enxerga o estado de antes ou de depois do COMMIT.
+- **D-P7 - Onde fica o `WktValidator`:** em `ApiMapas.Dominio/Geometrias/`.
+  - É uma cópia adaptada do validador do `teste_metry` mais `LimitesSrid`/`FaixaSrid`, sem log e com mensagens fixas (RP-14).
+  - O projeto de domínio não referencia `teste_graphy`/`teste_metry`; o comentário registra a origem.
+  - Junto com ele: o value object `GeometriaEntrada` (`TentarCriar`) e a política de SRID por coluna.
+- **D-P8 - Sucesso responde `204 No Content`, sem corpo.** Para conferir o resultado, o cliente usa o GET.
+- **D-P9 - Segunda conexão e quando a escrita fica desligada:**
+  - Variáveis `PG_ESCRITA_USER` e `PG_ESCRITA_PASSWORD`. Host, porta, base e `PG_SSLMODE` são os mesmos da leitura.
+  - Pool próprio: `Maximum Pool Size = 5`, `ApplicationName = ApiMapas.Escrita`, `CommandTimeout` de 15 s, `PersistSecurityInfo=false`, `IncludeErrorDetail=false`, sem `TrustServerCertificate` (RP-8).
+  - A escrita fica **desligada** (PUT não mapeado, responde 405, com log Warning no início) quando:
+    - as duas variáveis estão ausentes;
+    - `PG_SSLMODE` é `Disable` ou `Prefer` (RP-7);
+    - a role conectada é superusuário, tem `BYPASSRLS` ou tem `CREATEROLE` (R-1). A checagem é feita uma vez na subida, consultando `pg_roles` para o `current_user`. Se o banco não responder na subida, a escrita fica desligada.
+  - A API **sai com código 1** (a mensagem cita só o nome da variável) quando:
+    - só uma das duas variáveis está definida;
+    - `PG_ESCRITA_USER` é igual a `PG_USER` (comparação depois do `Trim`, sem diferenciar maiúsculas; RP-8);
+    - `PG_ESCRITA_PASSWORD` é igual a `PG_PASSWORD` (RP-8).
+- **D-P10 - Sem autenticação** (U-1). Proteções:
+  - a API só ouve em loopback (RA-5) e o `AllowedHosts` continua restrito;
+  - o Content-Type JSON é obrigatório (RP-12);
+  - não há CORS, method override nem POST nas rotas;
+  - o log de início avisa que há escrita sem autenticação (RP-13).
+- **D-P11 - Estouro do prazo de 30 s (RP-4) responde 500 genérico, e não 503.**
+  - Fica igual ao tratamento já existente para timeout e falha de banco (CA-4) e ao `57014`/pool esgotado (RP-10), e não introduz `Retry-After` nem um novo texto.
+  - O prazo usa um `CancellationTokenSource` ligado ao `RequestAborted`, com ROLLBACK.
+  - Quando o `RequestAborted` também está cancelado, o caso é cliente desconectado e continua 499 sem corpo (`ManipuladorExcecoes`).
+
+#### Requisitos do parecer P2 (RP-1 a RP-17, obrigatórios; R-1, R-2, R-3 e R-5 incluídos; R-4 fora do escopo)
+- Distribuição por camada:
+  - Database: RP-1, RP-2, RP-3 (role), RP-15 (SQL), RP-17, U-4.
+  - Backend: RP-3 (`SET LOCAL`) e RP-4 a RP-15, R-1, R-2.
+  - QA: RP-12, R-3 (P6.5), R-5 (P6.3) e os testes de cada RP.
+  - Fechamento: RP-9 (Postman), U-1 e U-4 (README).
+- **R-3** (QA, P6.5), texto do SecBrain: "os testes de integração criam os ids com mapas_teste, nunca com casaos. O P6.5 confirma que api_mapas_escrita não consegue TRUNCATE, não tem privilégio na sequência e não tem INSERT nem UPDATE em colunas além das concedidas."
+- **R-5** (QA, P6.3), texto do SecBrain: "a cobertura do P6.3 inclui o 499/cancelamento no meio da transação, com o ROLLBACK confirmado (CP-7)."
+- **R-4** (CHECK de SRID): continua opcional, fora deste pedido (ver "Opcional" nas ações do DBA).
+
+#### Contrato do PUT
+
+| Rota | Coluna gravada | SRIDs aceitos | Sucesso |
+|------|----------------|---------------|---------|
+| `PUT /api/mapas/{id}/graphy` | `public.mapas.graphy` (`ST_GeomFromText(@wkt, @srid)::geography`) | 4326 | 204 |
+| `PUT /api/mapas/{id}/metry`  | `public.mapas.metry` (`ST_GeomFromText(@wkt, @srid)`) | 4326, 4674, 3857, 31983 | 204 |
+
+- `{id}`: mesma regra do GET (sem constraint `:int`, validado por `IdMapa`, 1..2147483647). Constantes de rota reaproveitadas (`RotaGraphy`/`RotaMetry`), com `MapPut`. Sem POST nas rotas e sem method override (RP-12).
+- `Content-Type` (RP-12): só `application/json` exato. O parâmetro `charset` é opcional e, se vier, só `utf-8`, sem diferenciar maiúsculas. Qualquer outro valor responde 415.
+- Corpo:
+```json
+{
+  "geometrias": [
+    { "wkt": "POINT(-46.633309 -23.55052)", "srid": 4326 },
+    { "wkt": "LINESTRING(-46.64 -23.56, -46.62 -23.54)", "srid": 4326 }
+  ]
+}
+```
+- Opções do JSON (RP-11):
+  - os nomes de propriedade são exatamente `geometrias`, `wkt` e `srid`, sensíveis a maiúsculas;
+  - todos os campos são `required`;
+  - `MaxDepth` 8, `UnmappedMemberHandling Disallow`, `AllowDuplicateProperties false` e `NumberHandling Strict`.
+- O índice dos itens começa em 0 e a ordem do corpo é a ordem do INSERT.
+- Ordem das verificações, a primeira falha responde:
+  1. Limitador de concorrência e de taxa (429).
+  2. Id (400 `Id inválido`, sem ler o corpo e sem banco).
+  3. Content-Type (415).
+  4. Tamanho: `Content-Length` acima do limite, ou leitura com contador próprio que passa do limite (413). A `BadHttpRequestException` de tamanho também vira 413. Não desligar `MinRequestBodyDataRate` (RP-5).
+  5. JSON (400 `Corpo inválido`).
+  6. Itens (400 `Geometria inválida`).
+  7. Banco: validação em lote (400 `Geometria inválida`), lock (409), existência (404), gravação (204/500).
+- O corpo é lido pelo handler (não pelo binding automático do minimal API), para que todos os erros saiam no formato ProblemDetails abaixo.
+
+Respostas (`application/problem+json`, mesmos `type`/`traceId`, nada ecoado do corpo, sem SQL/SqlState/stack/host/usuário/`JsonException`):
+
+| Status | `title` | `detail` (texto fixo) | `instance` |
+|--------|---------|-----------------------|------------|
+| 204 | (sem corpo) | | |
+| 400 | `Id inválido` | `O id deve ser um inteiro entre 1 e 2147483647.` | modelo da rota (`/api/mapas/{id}/graphy`) |
+| 400 | `Corpo inválido` | `O corpo deve ser um JSON no formato {"geometrias":[{"wkt":"...","srid":4326}]}.` | modelo da rota |
+| 400 | `Geometria inválida` | `geometrias[{i}]: {motivo}`, com `{motivo}` vindo da lista fixa do validador (posição e `U+XXXX`, nunca o WKT), ou `quantidade acima do máximo de 100 geometrias`, `srid não permitido para a coluna '{coluna}' (aceitos: ...)`, `geometria inválida segundo o PostGIS (ST_IsValid)`, `tipo devolvido pelo banco diverge do WKT` | modelo da rota |
+| 404 | `Mapa não encontrado` | `Nenhuma linha encontrada em public.mapas para o id {id}.` (id validado) | `/api/mapas/{id}/{coluna}` com o id validado |
+| 405 | (padrão ASP.NET) | escrita desligada (D-P9) ou método não mapeado | omitido |
+| 409 | `Atualização concorrente` | `Outra atualização do id {id} está em andamento. Tente novamente.` | `/api/mapas/{id}/{coluna}` com o id validado |
+| 413 | `Corpo muito grande` | `O corpo excede o limite de {limite} bytes.` | modelo da rota |
+| 415 | `Tipo de mídia não suportado` | `Use Content-Type: application/json (charset utf-8 opcional).` | modelo da rota |
+| 429 | `Muitas requisições` (atual) | texto atual; vale também para o limite de escrita (10/min) e para os 3 PUT simultâneos | omitido |
+| 500 | `Erro interno` (atual) | texto atual; inclui o prazo de 30 s, `57014` e pool esgotado (D-P11/RP-10) | omitido |
+
+- `type`: RFC 9110 15.5.1 (400), 15.5.5 (404), 15.5.10 (409), 15.5.14 (413), 15.5.16 (415).
+- Logs (RP-10/RP-13):
+  - **Auditoria Information por PUT** concluído: id, coluna, quantidade, linhas atualizadas, apagadas e inseridas, `traceId`.
+  - Lista vazia: **Warning**.
+  - Falhas: só SqlState, id, coluna e índice. Nunca `MessageText`, `Hint`, `Detail`, `Where`, `ToString` da exceção, WKT, corpo ou `JsonException`.
+
+##### Critérios de aceite (CP-1 a CP-16)
+- CP-1: um PUT válido em um id existente responde 204. O GET seguinte devolve exatamente as geometrias enviadas, na ordem, e as linhas antigas da coluna não aparecem mais.
+- CP-2: a outra coluna do mesmo id não muda: linhas com as duas colunas ficam com a outra coluna intacta, e o GET da outra coluna devolve o mesmo resultado de antes.
+- CP-3: repetir o mesmo PUT gera o mesmo estado (mesmas linhas e contagens por coluna para o id).
+- CP-4: `geometrias: []` responde 204, o GET da coluna responde 404 e há um log Warning. Linhas que só tinham essa coluna são apagadas; as que também tinham a outra coluna são preservadas.
+- CP-5: id sem linhas responde 404 e nada é inserido.
+- CP-6: id inválido responde 400 sem ler o corpo. JSON malformado, raiz errada, campo faltando, campo extra, campo duplicado, nome com outra caixa ou `srid` em texto responde 400 `Corpo inválido`. WKT/SRID/tipo/limites inválidos respondem 400 `Geometria inválida` com o índice. Em todos esses casos nada é gravado.
+- CP-7: falha em qualquer etapa do banco (item inválido no PostGIS, erro no INSERT, cancelamento, prazo de 30 s) faz ROLLBACK e deixa o estado anterior intacto.
+- CP-8: 101 geometrias, WKT com 10.001 caracteres ou corpo acima de 1 MiB respondem 400/400/413, inclusive sem `Content-Length`. `text/plain`, `application/json; charset=latin1` e `application/x-www-form-urlencoded` respondem 415.
+- CP-9: dois PUTs simultâneos no mesmo id terminam com um estado igual ao de um deles, nunca misturado. Espera acima de 5 s responde 409. Um 4º PUT simultâneo responde 429.
+- CP-10: o SQL é constante por coluna (W1/W2, por `switch`), parametrizado (`@id` Integer, `@wkt` Text, `@srid` Integer, arrays `Text[]`/`Integer[]`) e com os predicados exatos do UPDATE/DELETE. O PUT usa só a conexão de escrita e o GET só a de leitura.
+- CP-11: configuração:
+  - sem `PG_ESCRITA_*`, com `PG_SSLMODE` `Disable`/`Prefer` ou com role superusuário/`BYPASSRLS`/`CREATEROLE`, a API sobe e o PUT responde 405 com log Warning;
+  - só uma das variáveis definida, usuário igual ao de leitura (com caixa e espaços diferentes), senha igual à de leitura, ou `LimiteBytesCorpoPut`/`LimiteEscritasPorMinuto` fora da faixa, fazem a API sair com código 1.
+- CP-12: `Host` malicioso responde 400. `OPTIONS` com `Origin` não devolve cabeçalhos CORS. `POST` e `X-HTTP-Method-Override` nas rotas não gravam nada (RP-12).
+- CP-13: logs de auditoria e de falha conforme RP-10/RP-13, sem WKT, corpo, `MessageText` ou credenciais.
+- CP-14: a role `api_mapas_escrita` tem exatamente os privilégios de RP-1; `api_mapas_leitura` não tem nenhuma escrita.
+- CP-15: `roles.sql` aborta se `public.mapas` tiver colunas além de `id`, `graphy` e `metry` (RP-2).
+- CP-16: cobertura de linhas de pelo menos 80% (meta: manter o patamar atual, cerca de 99%).
+
+## Pedido (2026-10-23): POST para `/api/mapas/{id}/graphy` e `/api/mapas/{id}/metry` (`api_mapas`)
+
+### PO1 - Planejamento por camada (contrato do POST, decisões, critérios de aceite)
+- Responsável: analista (SubBrain)
+- Concluído em: 2026-10-23
+- O que foi gerado (plano SUPERADO pelo PO1-R abaixo, depois da mudança do modelo de dados pelo usuário):
+  - Decisões D-PO1 a D-PO10: transação só com INSERT (W3/W4) sob o mesmo advisory lock 1296125011 do PUT; id inexistente aceito com log Warning não bloqueante quando o id não tinha linhas e é maior que o `max(id)` da tabela (sem privilégio na sequência; uso do `last_value` fica para decisão do SecBrain); 201 sem corpo com `Location` normalizado; lista vazia 400 `Geometria inválida` ("quantidade abaixo do mínimo de 1 geometria"); 409 com os textos do PUT; limitadores, limites, prazo e pool compartilhados com o PUT; nenhuma mudança em `roles.sql`; liga/desliga do D-P9 com o log "Escrita (PUT e POST)"; RP-12 revista (POST só nas duas rotas, method override ignorado, Content-Type estrito).
+  - Contrato do POST (rotas, ordem das verificações, diferenças de resposta em relação ao PUT, logs) e critérios de aceite CPO-1 a CPO-14.
+  - Subtarefas PO2.1–PO2.6 (security), PO3.1–PO3.3 (database), PO4.1–PO4.5 (backend), PO6.1–PO6.5 (qa) e PO7.1–PO7.4 (fechamento), incluindo a revisão de `ApiEscritaTests.PostPatchDeleteEMethodOverride_405_NaoGravam`, do CP-12 e da requisição Postman "graphy - POST nao mapeado (405, sem method override)".
+
+### PO2 - Revisão de segurança do plano do PO1
+- Responsável: security (SecBrain)
+- Concluído em: 2026-10-23. Parecer: aprovado com ajustes. Os itens que continuam valendo com o modelo novo viraram RS-1 a RS-7 no plano do PO1-R (`afazer.md`, D-N8):
+  - RS-1: Content-Type estrito com 415 pelo `LeitorCorpoHttp`, sem binding automático.
+  - RS-2: middleware 403 antes do rate limiter quando vier `Origin` ou `Sec-Fetch-Site` diferente de `none`/`same-origin`, só nos endpoints de escrita.
+  - RS-3: `UseHttpMethodOverride` proibido.
+  - RS-4: logs com o método e EventIds próprios; 4006 a 4010 passam a dizer "PUT e POST"; 201 via `TypedResults.Created`, sem corpo, com `Location` relativo montado a partir do int.
+  - RS-5: documentar o crescimento da tabela e do disco e o retry sem idempotência.
+  - RS-6: testes de 415 (`text/plain`, form-urlencoded, multipart, sem Content-Type, lista com vírgula, Content-Type duplicado, latin1).
+  - RS-7: o Postman e a integração não criam ids fora do controle.
+- PO2.2 (aviso de colisão): o usuário escolheu `last_value`, depois superado pela PK (D-N2 do PO1-R).
+
+### PO1-R - Replanejamento com `public.mapas.id` como PRIMARY KEY
+- Responsável: analista (SubBrain)
+- Concluído em: 2026-10-23
+- O que foi gerado (plano em `tarefas/afazer.md`, "Plano do PO1-R", para o SecBrain revisar no PO2b):
+  - Perguntas ao usuário Q1 a Q6, cada uma com recomendação: corpo de uma geometria, formato do GET, PUT preenchendo a outra coluna, PUT sem limpar nem apagar (revoga o `DELETE`), `GENERATED ALWAYS`, apoio à deduplicação.
+  - Decisões D-N1 a D-N12:
+    - o `last_value` perde o sentido; o risco residual é o `23505`, que responde 500;
+    - migração com parada em duplicado e `setval` que nunca volta;
+    - `roles.sql` sem `USAGE` na sequência (a identity não verifica privilégio), `INSERT` sem `id` e guarda de PK;
+    - contratos novos de POST (`/api/mapas/graphy|metry`, 201 + `Location`), PUT (UPDATE pela PK, sem advisory lock) e GET (uma geometria);
+    - RS-1 a RS-7; escrita desligada sem PK;
+    - `teste_graphy`/`teste_metry` sem mudança de código;
+    - Postman e integração com ids capturados do `Location`.
+  - Critérios CN-1 a CN-15 e subtarefas PO2b, PO3, PU-DBA, PO4, PO5, PO6 e PO7.
+
+### PU - Respostas do usuário às perguntas Q1 a Q6 do PO1-R
+- Responsável: usuário
+- Concluído em: 2026-10-23. O usuário aceitou todas as recomendações:
+  - Q1: corpo de objeto único `{"wkt","srid"}`.
+  - Q2: GET com objeto único.
+  - Q3: o PUT pode preencher a outra coluna.
+  - Q4: o PUT só faz UPDATE e o `DELETE` da `api_mapas_escrita` é revogado (U-2 encerrado).
+  - Q5: `GENERATED ALWAYS`.
+  - Q6: relatório somente leitura e modelo comentado de mescla.
+- As respostas estão registradas como a decisão 6 do pedido em `afazer.md`, e as alternativas que não foram escolhidas saíram do plano.
+
+### PO2b - Revisão de segurança do replanejamento (PO1-R)
+- Responsável: security (SecBrain)
+- Concluído em: 2026-10-23. Parecer: aprovado com requisitos. No plano em `afazer.md`, os achados viraram RS-8 a RS-26 e foram incorporados ao D-N3, D-N4, D-N5, D-N6, D-N7, D-N9, D-N10, D-N12, aos critérios CN-7 a CN-10 e CN-13, e às tarefas PO3, PU-DBA, PO4, PO6, PO7 e PU-R.
+  1. Identity sem `USAGE`: confirmado; o PO3.1 prova isso nos modos `BY DEFAULT` e `ALWAYS` (RS-8).
+  2. Q5: a guarda C3 passa a exigir `attidentity = 'a'`, e a matriz espera INSERT em `id` = false (RS-9).
+  3. Migração numa única transação, nesta ordem: `lock_timeout` 5s e `statement_timeout` 5min → `LOCK ACCESS EXCLUSIVE` → guardas → contagem → NULL/duplicados com `RAISE` → PK → `setval` → `GENERATED ALWAYS` → `DROP INDEX` → conferência → `COMMIT`. Execução com `ON_ERROR_STOP` e `-1` (RS-10).
+  4. PU-DBA: primeiro desligar a escrita antiga (`PG_ESCRITA_*` e/ou `NOLOGIN` + `pg_terminate_backend`); segundo backup se houver intervalo grande (RS-11).
+  5. `setval` via `pg_get_serial_sequence` com `GREATEST(max(id), last_value)`, nunca para trás; `RAISE` se `max(id) > 2147483647 - 1000000`; conferência informativa da sequência na seção 5 (RS-12).
+  6. Idempotência passo a passo: só vale a PK exata em `id` (`contype = 'p'`, `conkey`, `indisvalid`); outra PK ou UNIQUE aborta; `DROP INDEX IF EXISTS` só se o índice for de `mapas(id)` (RS-14).
+  7. Relatório em `READ ONLY`, sem geometria por padrão e com a saída fora do repositório e do OneDrive. Mescla numa transação com `LOCK EXCLUSIVE`, reclassificação dentro da transação, UPDATE/DELETE por `ctid` com `rowcount = 1` senão `RAISE`, sem tocar nos conflitantes (RS-24).
+  8. `roles.sql`: 4.3 com só `SELECT (id, graphy, metry)`, `UPDATE (graphy, metry)` e `INSERT (graphy, metry)`; 4.5 com INSERT `id` = false e DELETE = false; guarda de PK exata; textos do cabeçalho, da 0.1 e da 4.3; 5.4, 5.5 e CP-14; remoção da 5.12 e do advisory lock na 5.11; o script deixa de rodar antes da migração; U-2 encerrado (RS-15).
+  9. Revogação do `DELETE` aprovada; o README explica a limpeza com `mapas_teste` religada temporariamente ou `casaos` local (RS-16).
+  10. `23505` em `mapas_pkey` responde 500, com log Error só com SqlState e constraint, sem retry; `23514` e os outros `23505` também respondem 500 (RS-17).
+  11. `55P03` e `40P01` no POST respondem 409 com os textos do PUT, log Warning e ROLLBACK (decisão do orquestrador); no PUT, o `55P03` continua 409 (RS-18).
+  12. PUT com `rowcount > 1`: ROLLBACK, 500 e log Error (RS-19).
+  13. `VerificadorRoleEscrita` confere a PK exata, o `DELETE` e o INSERT em `id`; se algo falhar, a escrita fica desligada com Warning e `DataSource.Clear()`; o GET continua (RS-20).
+  14. Com a escrita desligada, o POST responde 404 e o PUT 405 (decisão: aceitar o 404; RS-21).
+  15. O middleware 403 fica entre `UseStatusCodePages` e `UseRateLimiter`, nunca como filtro, e a metadata vai também nos POST. Ele responde 403 para `Origin` presente, `Sec-Fetch-Site` com mais de um valor, ou `Sec-Fetch-Site` diferente de `none`/`same-origin` (trim, sem diferenciar maiúsculas). Não lê o corpo, não ecoa nada e registra log Debug sem os valores (RS-22).
+  16. CHECK `(graphy IS NOT NULL OR metry IS NOT NULL) NOT VALID` na migração e `VALIDATE` depois do relatório (decisão: adotar; RS-13).
+  17. GET com `LIMIT 2`: 2 linhas respondem 500 com log Error; documentar que a migração é pré-requisito também da leitura (RS-23).
+  18. RS-1, RS-3 e RS-6 nas rotas novas; `Location` a partir do `RETURNING`; corpo de 64 KiB aprovado; limitador global de escrita de 10/min sem partição (decisão: adotar); POST do Postman numa coleção separada (RS-25).
+  19. Riscos residuais R-N1 a R-N5 para o usuário aceitar, sem bloquear (RS-26, tarefa PU-R em `afazer.md`).
+
+### PO3 - Banco: migração, relatório, mescla, `roles.sql` e SQL de referência
+- Responsável: database (DataBrain)
+- Concluído em: 2026-10-23. Nada foi executado no servidor. Tudo foi validado num container `postgis/postgis:17-3.5` descartável, já removido; o registro está em `database/README.md`, "Validação local do PO3".
+  - PO3.1 `database/prova_identity_sem_usage.sql` (RS-8): o INSERT sem id funciona sem privilégio na sequência nos modos `BY DEFAULT` e `ALWAYS`; o `nextval` direto é negado; em `ALWAYS`, id explícito falha com `428C9`; sem INSERT em `id`, `OVERRIDING` falha com `42501`. Termina em ROLLBACK.
+  - PO3.2 `database/migracao_mapas_pk.sql` (D-N3; RS-10, RS-12, RS-14), executada com `psql -X -v ON_ERROR_STOP=1 -1 -f -`:
+    - ordem: timeouts → `LOCK ACCESS EXCLUSIVE` → guardas (RP-2, identity, PK/UNIQUE/EXCLUSION/índice único fora da PK exata, CHECK divergente, sessão aberta da `api_mapas_escrita` (RS-11)) → contagem → NULL/duplicado (máx. 20 ids) → `mapas_pkey` → `setval` sem voltar, com limite `2147483647 - 1000000` → `GENERATED ALWAYS` → CHECK `mapas_nao_vazia` `NOT VALID` → `DROP` do `ix_mapas_id` só se for btree simples de `mapas(id)` → conferência;
+    - idempotente; sem `-1`, para no `LOCK TABLE`.
+  - PO3.3 `database/validar_check_mapas.sql` (RS-13): aborta se houver linha vazia e é idempotente.
+  - PO3.4 `database/relatorio_duplicados_mapas.sql` (RS-24): `REPEATABLE READ READ ONLY` com ROLLBACK, sem geometria; seções R1 a R5, classificação mesclável/conflitante e aviso de onde não salvar a saída.
+  - PO3.5 `database/mescla_duplicados_mapas.sql` (RS-24): modelo comentado (prefixos `--: ` e `--c: `, extraídos com `sed`):
+    - parte A, mescláveis: `LOCK EXCLUSIVE`, reclassificação na transação, UPDATE/DELETE por ctid com `rowcount = 1` e conferência por md5;
+    - parte B: um conflitante escolhido pelo usuário (ctid + md5 via `-v`);
+    - o padrão é ensaio (ROLLBACK); só grava com `-v confirmar=1`.
+  - PO3.6 `database/roles.sql` revisão 5 (D-N4; RS-9, RS-15, RS-16):
+    - a `api_mapas_escrita` fica com `SELECT (id, graphy, metry)`, `UPDATE (graphy, metry)` e `INSERT (graphy, metry)`, sem `DELETE` e sem INSERT em `id`;
+    - guardas: a C3 exige `attidentity = 'a'` e a nova 0.2 exige a PK exata (o script aborta antes da migração);
+    - a 4.5 espera INSERT em `id` = f e `DELETE` = f;
+    - 5.4/5.5/5.6 ajustadas; a 5.11 ficou sem advisory lock; a 5.12 virou a conferência da sequência e a 5.13 é nova (constraints);
+    - textos do cabeçalho, da 0.1, da 4.1 e da 4.3 atualizados; U-2 encerrado; limpeza RS-16 na seção 6.
+  - PO3.7 `api_mapas/sql/consultas_referencia.sql`:
+    - Q1/Q2 com `LIMIT 2`, sem filtrar a coluna, e a coluna nova `preenchida` (índice 8);
+    - W1.V/W2.V mantidas;
+    - W1/W2: `SET LOCAL lock_timeout` + UPDATE pela PK;
+    - W3/W4: `SET LOCAL lock_timeout` + `INSERT ... RETURNING id`;
+    - V1 do `VerificadorRoleEscrita`: colunas 0 a 5 de hoje, mais `pode_delete`, `insere_id`, `pk_exata` e `id_always` (esta última é uma recomendação além do RS-20);
+    - o bloco histórico da A3.4 e a sugestão do `ix_mapas_id` saíram.
+  - PO3.8 `teste_graphy/sql/validacao.sql` e `teste_metry/sql/validacao.sql`: conferência informativa `pk_exata`/`id_always` e textos de "esperado" antes e depois da migração.
+  - PO3.9 `database/README.md`:
+    - tabela e sequência no estado pós-migração;
+    - roles e `api_mapas_escrita` na revisão 5;
+    - seção nova "Migração para PRIMARY KEY (PU-DBA)" com os 9 passos do RS-11 e os comandos;
+    - migração como pré-requisito também da leitura (RS-23);
+    - "Limpeza de ids de teste" (RS-16) e U-2 encerrado;
+    - nota no procedimento antigo de ligar o PUT;
+    - registro da validação local.
+  - Extra: `database/mapas.sql` ganhou, em comentário, a forma da tabela depois da migração.
+
+### PO4 - Backend: POST de `graphy`/`metry`, PUT e GET com uma geometria por id
+- Responsável: backend (BackBrain)
+- Concluído em: 2026-10-23. Nada foi executado no banco real; `dotnet build` sem avisos e `dotnet test` com 1117 aprovados, 0 falhas e 18 ignorados (integração opt-in).
+  - PO4.1 Domínio e Aplicação:
+    - `IMapasRepository.ObterPorIdAsync` devolve `LeituraMapa` (NaoEncontrada, ColunaVazia, Duplicada, Encontrada);
+    - `IMapasEscritaRepository.AtualizarAsync` (PUT) e `CriarAsync` (POST) devolvem `ResultadoEscrita` (o `ResultadoSubstituicao` saiu);
+    - corpo de objeto único `CorpoGeometriaDto` (Q1), lido e validado por `EntradaGeometria` (RP-11, RP-14), comum a PUT e POST;
+    - `CriacaoGeometriasService` novo (POST, EventIds 4201 a 4212); `AtualizacaoGeometriasService` sem lista, sem limite de 100 e sem U-3;
+    - GET devolve `RespostaGeometriaDto` (objeto único da Q2); 2 linhas ou teto de bytes estourado lançam `LeituraInconsistenteException` (500; log Error 1004 e Warning 1005);
+    - `LimitesEscrita.LimiteGeometriasPut`, `MotivosGeometria.QuantidadeAcima` e `OpcoesConsulta.LimiteItens` saíram.
+  - PO4.2 Infraestrutura:
+    - SQL copiado exatamente do PO3.7: Q1/Q2 (`LIMIT 2`, `preenchida` lida antes), W1.V/W2.V, W1/W2 (UPDATE pela PK), W3/W4 (`INSERT ... RETURNING id`) e V1;
+    - PUT: rowcount 0 = ROLLBACK e 404; 1 = COMMIT e 204; mais de 1 = ROLLBACK, log Error 2116 e 500 (RS-19); `55P03` = 409;
+    - POST: `55P03`/`40P01` = ROLLBACK, Warning 2111 e 409 (RS-18); `23505` em `mapas_pkey` = Error 2132 ("id gerado já existe; conferir a sequência"); outros `23505` e `23514` = Error 2133; os dois com SqlState e constraint, sem retry e sem Detail/MessageText (RS-17); RETURNING inválido = Error 2134;
+    - sem advisory lock, sem DELETE, sem lista e sem id explícito em INSERT;
+    - `VerificadorRoleEscrita` com a V1: colunas 0 a 7 verdadeiras = `RolePrivilegiada`; 8 ou 9 falsas = `SemChavePrimaria` (motivo novo); Warning 2205/2206; o `Program` chama `DataSource.Clear()` (RS-20).
+  - PO4.3 API:
+    - `POST /api/mapas/graphy|metry` com `LeitorCorpoHttp` (sem binding automático), 201 via `TypedResults.Created` sem corpo e `Location: /api/mapas/{id}/{coluna}` a partir do int do RETURNING; com a escrita desligada, as rotas não existem (POST 404, PUT 405 - RS-21);
+    - `OrigemEscritaMiddleware` entre `UseStatusCodePages` e `UseRateLimiter`, só nos endpoints com `MarcadorEscritaMapas` (PUT e POST): 403 com `Origin` presente, `Sec-Fetch-Site` com mais de um valor ou diferente de `none`/`same-origin` (trim, sem diferenciar maiúsculas); não lê o corpo, não ecoa cabeçalhos, log Debug 4012 sem valores (RS-22);
+    - limitador global de escrita sem partição (`ApiMapas:LimiteEscritasPorMinuto`, padrão 10) encadeado a global/IP, escrita por IP e simultâneas; PUT e POST compartilham todos;
+    - `LimiteBytesCorpoPut` com padrão 65.536 (appsettings e `OpcoesAtualizacao`);
+    - eventos 4006 a 4010 com "PUT e POST"; `UseHttpMethodOverride` proibido com comentário (RP-12/RS-3).
+  - Testes existentes ajustados só para o modelo novo (os testes novos e a cobertura são do PO6):
+    - `ServidorPostgresFalso` com a coluna `preenchida` e a resposta `ColunaVazia`; `ServidorPostgresEscritaFalso` com o nome da constraint no ErrorResponse;
+    - `RepositorioFalso`, `RepositorioEscritaFalso` e `CorposPut` no modelo de uma geometria;
+    - removidos os testes de comportamento que deixou de existir: lista vazia/U-3, limite de 100 itens, truncado, advisory lock, DELETE e contagem divergente do INSERT;
+    - `IntegracaoEscritaTests` portado só para compilar (a suíte do PO6.4 o substitui).
+  - Verificado num teste descartável (removido; fica para o PO6): POST 201 com `Location`, 409/415/400 no POST, 403 de origem sem consumir o limite e sem eco, limitador global somando PUT e POST, POST com override `PUT` só insere.
+
+### PO5 - Revisão de segurança da implementação (POST, PUT e GET com uma geometria por id)
+- Responsável: security (SecBrain)
+- Concluído em: 2026-10-23. Parecer: **aprovada com observações**, sem achado Crítico, Alto ou Médio. Achados de severidade Baixa e destino de cada um (decisão do orquestrador: corrigir tudo agora):
+  1. O limitador global de escrita usa a mesma chave `LimiteEscritasPorMinuto` do limite por IP. Destino: README no PO7.2, com a conta de disco no teto de 60/min.
+  2. Uma escrita recusada por simultaneidade gasta a cota por minuto. Destino: PO5.C2a (BackBrain), com `escritaSimultanea` primeiro no `CreateChained` (`Program.cs:294`).
+  3. A V1 não confere UPDATE em `id`, `rolcreatedb`, `rolreplication` nem membership (`pg_auth_members`). Destino: PO5.C1a (DataBrain, V1 do `consultas_referencia.sql`) e depois PO5.C2b (BackBrain, `VerificadorRoleEscrita`, tratando como `RolePrivilegiada`).
+  4. A mescla grava com `-v confirmar=0`. Destino: PO5.C1b (DataBrain, `mescla_duplicados_mapas.sql`, linhas 137 e 248: gravar só com `confirmar` exatamente `'1'`).
+  5. A seção R2 do relatório engana quando roda como `api_mapas_leitura`. Destino: PO5.C1c (DataBrain: aviso no cabeçalho e "sem privilégio" quando `last_value` vier NULL).
+- Pedidos ao PO6, além do que já estava previsto (registrados como PO6.6): 403 sem consumir limite em cada uma das 3 condições; `Origin` vazio e `null`; `Sec-Fetch-Site` vazio, com vírgula e repetido; ordem da cadeia de limitadores; V1 com privilégio sobrando ou sem PK (POST 404, PUT 405).
+
+### PO5.C1 - Correções do parecer PO5 (DataBrain)
+- Responsável: database (DataBrain)
+- Concluído em: 2026-10-23. Nada foi executado no banco real e nenhum C# foi alterado. Validado num container `postgis/postgis:17-3.5` descartável, sem porta publicada, removido no fim.
+  - a. Achado 3: a V1 de `api_mapas/sql/consultas_referencia.sql` ganhou 4 colunas no fim, sem mudar os índices 0 a 9: 10 `atualiza_id` (`has_column_privilege(current_user,'public.mapas','id','UPDATE')`), 11 `rolcreatedb`, 12 `rolreplication` e 13 `membro_de_role` (`EXISTS` em `pg_auth_members` com `member = r.oid`). Regra: habilita só com 0 a 7 = false, 8 e 9 = true e 10 a 13 = false. Cada privilégio extra concedido isoladamente ligou só a coluna esperada (UPDATE em `id`, na tabela e `TO PUBLIC`; CREATEDB; REPLICATION; membership comum, em role predefinida e com `INHERIT FALSE, SET FALSE`). Libera a PO5.C2b.
+  - b. Achado 4: em `database/mescla_duplicados_mapas.sql`, partes A (`--: `) e B (`--c: `), o `confirmar` é comparado no servidor (`:'confirmar' = '1'`) e vira a variável `gravar`; sem a variável, `gravar = false`. Ensaio (ROLLBACK, nada alterado) com confirmar ausente, `0`, `nao`, `sim`, `01`, vazio, com aspas e só `-v gravar=1`; COMMIT só com `confirmar=1`.
+  - c. Achado 5: `database/relatorio_duplicados_mapas.sql` avisa no cabeçalho e na R2 que a R2 só é confiável como `casaos`. Sem privilégio `SELECT,USAGE` na sequência, `last_value` e `proximo_valor` mostram `sem privilegio`, e a coluna nova `r2_confiavel` sai `f`; com privilégio e sequência sem uso, `last_value` = `nunca usada`. Conferido como `api_mapas_leitura` e como `casaos`.
+  - Documentação: `database/README.md` atualizado (regra da V1 com 14 colunas, aviso da R2, `confirmar` exatamente 1, registro da validação). O `roles.sql` não cita a V1 e não mudou.
+
+### PO5.C2 - Correções do parecer PO5 (BackBrain)
+- Responsável: backend (BackBrain)
+- Concluído em: 2026-10-23. Nada foi executado no banco real; `dotnet build` sem avisos e `dotnet test` com 1121 aprovados, 0 falhas e 18 ignorados (integração opt-in).
+  - a. Achado 2: `escritaSimultanea` passou a ser o primeiro limitador do `CreateChained` (`api_mapas/src/ApiMapas.Api/Program.cs`), com comentário. O encadeamento para no primeiro que recusa, então o 429 por simultaneidade não gasta as cotas de janela fixa (global, escrita por IP e escrita global). Para o GET, `escritaSimultanea` é `NoLimiter`. Conferido num teste descartável (removido; fica para o PO6): com 4 escritas/min, 3 escritas presas e 3 recusas por simultaneidade, a 4ª escrita depois passa e a 5ª recebe 429; o GET responde 200 durante as recusas.
+  - b. Achado 3: `VerificadorRoleEscrita` com a V1 nova de 14 colunas, copiada exatamente da linha 291 de `api_mapas/sql/consultas_referencia.sql` (o teste de texto exato passa). As colunas 10 a 13 (`atualiza_id`, `rolcreatedb`, `rolreplication`, `membro_de_role`) verdadeiras levam a `RolePrivilegiada`, com Warning 2205 e `DataSource.Clear()` no `Program`; log Debug 2208 novo com os 4 valores. Os textos do motivo (`ConexaoEscritaConfig`) foram atualizados.
+  - Testes ajustados só para o build: o protocolo falso do verificador (`ConexaoEscritaConfigTests`) passou a ter 14 colunas, completando com false; em `ApiEscritaDesligadaTests.R1_Real_CadaCriterio_405`, o critério 10 a 13 desliga a escrita.
+
+### PO6 - Testes do POST, do PUT e do GET com uma geometria por id (qa / TestBrain)
+- Responsável: qa (TestBrain)
+- Concluído em: 2026-10-23. Nada foi executado no banco real (`PG_RUN_INTEGRATION` removido do ambiente em todas as execuções). `dotnet test` da `api_mapas`: 1399 aprovados, 0 falhas, 25 ignorados (integração opt-in; 18 anteriores + 7 novos), estável em 5 execuções seguidas.
+  - Cobertura (coverlet, `api_mapas`): 97,81% de linhas (2860/2924) e 95,53% de ramos (898/940). Só o código escrito à mão: 99,59% de linhas. Por pacote: Api 100%, Aplicacao 97,92%, Dominio 100%, Infraestrutura 95,41% (o que falta é código gerado pelo `LoggerMessage` e fechamentos de `await using`).
+  - PO6.5: `teste_graphy` 391 aprovados/3 ignorados, 93,99% de linhas; `teste_metry` 881/3, 98,64%.
+  - Testes novos: `Aplicacao/CriacaoGeometriasServiceTests.cs`, `Api/ApiPostTests.cs` (POST em memória e pilha completa no protocolo falso), `Api/OrigemEscritaTests.cs` (403 de origem e Kestrel cru), `Api/LimitesEscritaTests.cs`, `Api/ApiGetUmaGeometriaTests.cs`, `Infraestrutura/MapasEscritaRepositoryPostTests.cs` (ramos do POST e V1 de 14 colunas).
+  - Ajustados: `Api/ApiEscritaTests.cs` (escrita desligada: POST metry 404, GET metry 200 e motivo `SemChavePrimaria`), `Api/LeitorCorpoHttpTests.cs` (coleção Kestrel serial), `Integracao/IntegracaoEscritaTests.cs` (limpeza no `finally` com `rowcount == 1` via `mapas_teste`, id do `Location`, CN-1/2/3/4/6/13/14) e suporte (`EscritaFalsos.Sequencial`, `ApiEscritaFactory.IpPorCabecalho`, loggers que leem o estado estruturado).
+  - Achado PO6-1 (Baixa, para o analista): uma escrita recusada pela cota de escrita por minuto gasta 2 permissões do limitador global por IP (`Program.cs:297` + `AttemptAcquire` e `AcquireAsync` do middleware). Detalhe no relatório do TestBrain.
+
+### Contrato do POST e decisões (referência, implementados; plano do PO1-R movido de `afazer.md` no PO7)
+
+> Pedido do usuário: "Crie o método POST para os endpoints graphy e metry". Features abertas pelo MegaBrain.
+> **Replanejado em 2026-10-23 (PO1-R)**: depois do parecer PO2 do SecBrain, o usuário mudou o modelo de dados.
+> O plano anterior (D-PO1 a D-PO10: POST com id na rota e várias linhas por id) está **superado**; o registro
+> fica em `feito.md` (PO1 e PO2).
+
+**Decisões do usuário (fechadas, não reabrir):**
+1. **`public.mapas.id` passa a ser PRIMARY KEY com autoincremento**: uma linha por id, com as colunas `graphy` e `metry` da mesma linha.
+2. **POST cria um id novo pela sequência, sem id na rota**: `POST /api/mapas/graphy` e `POST /api/mapas/metry`. Preenche só a coluna da rota, deixa a outra NULL e devolve o id gerado no `Location`.
+3. **PUT e GET passam a tratar uma geometria por id** (a da coluna da rota).
+4. **`last_value`** foi a escolha do usuário para o aviso de colisão (PO2.2). Ver D-N2: com a PK e o id vindo da sequência, o aviso perde o sentido e sai do plano.
+5. Continuam valendo do pedido original: mesmas validações (`WktValidator`, `GeometriaEntrada`, política de SRID por coluna, RP-11, RP-14), 10.000 caracteres por WKT, conexão `PG_ESCRITA_*`, liga/desliga do D-P9 e method override proibido.
+6. **Respostas à PU (2026-10-23, todas as recomendações aceitas):**
+   - Q1: o corpo do POST e do PUT é um objeto único: `{"wkt":"POINT(-46.63 -23.55)","srid":4326}`.
+   - Q2: o GET devolve um objeto único `{"id","coluna","tipo","srid","wkt","geojson","x","y","longitude","latitude"}`, sem `quantidade`, `truncado` nem lista.
+   - Q3: o PUT pode preencher a outra coluna da mesma linha. O PUT nunca cria id (sem linha, responde 404).
+   - Q4: o PUT exige 1 geometria e só faz UPDATE da coluna, sem limpar nem apagar linha. O `DELETE` da `api_mapas_escrita` é revogado, o que encerra o U-2. Limpar ou apagar vira um pedido futuro.
+   - Q5: `id` passa a `GENERATED ALWAYS AS IDENTITY`.
+   - Q6: o DataBrain entrega um relatório somente leitura e um modelo **comentado** de mescla só para os ids "mescláveis" (no máximo 1 linha com `graphy` e 1 com `metry`). Nos ids conflitantes, o usuário escolhe qual linha manter.
+
+**Ordem:** PU (concluída) → PO2b security (concluído) → PO3 database (concluído) → PU-DBA (migração pelo usuário/DBA) → PO4 backend (concluído) → PO5 security (concluído) → PO5.C1 database e PO5.C2 backend (concluído) → PO6 qa (concluído) → PO7 analista. Frontend: fora do escopo.
+
+#### Plano do PO1-R (SubBrain), ajustado pelo parecer PO2b
+
+#### Decisões do SubBrain (D-N1 a D-N12)
+- **D-N1 - Modelo.** `id` int4 identity e PRIMARY KEY, uma linha por id. `graphy` e `metry` do mesmo id ficam na mesma linha; qualquer uma pode ser NULL. A tabela continua só com `id`, `graphy` e `metry` (RP-2).
+- **D-N2 - `last_value` e o aviso de colisão saem do plano.**
+  - Motivo: a API não informa mais id em nenhum INSERT (o POST usa a identity e o PUT só faz UPDATE). Com isso, o risco que motivou o D-P3 e o D-PO2 (id explícito à frente da sequência, misturando linhas sem PK) deixa de existir no caminho da API. Também não há consulta à sequência nem `max(id)`.
+  - Risco residual: um INSERT manual com id explícito (ex.: `casaos`) à frente da sequência faz um POST futuro falhar com `23505` (violação da PK). Esse caso responde **500 genérico**, com log **Error** próprio ("id gerado já existe; conferir a sequência", sem valores). Não mistura dados, porque a PK impede. Com a Q5 (`GENERATED ALWAYS`), id explícito só entra com `OVERRIDING SYSTEM VALUE` (manual, fora da API).
+  - A escolha do usuário (`last_value`) fica registrada como superada pela decisão 1. Se ele ainda quiser um aviso, ele volta como pedido separado.
+- **D-N3 - Migração (DataBrain, script novo em `database/`, executado pelo usuário/DBA; ajustada pelo PO2b, RS-8 a RS-14).**
+  - Tudo numa única transação, executada com `psql -v ON_ERROR_STOP=1 -1`, nesta ordem:
+    1. `SET LOCAL lock_timeout = '5s'` e `SET LOCAL statement_timeout = '5min'`;
+    2. `LOCK TABLE public.mapas IN ACCESS EXCLUSIVE MODE`;
+    3. guardas: só as 3 colunas (RP-2) e `id` identity;
+    4. contagem de linhas (guardada para a conferência);
+    5. detecção de `id` NULL ou duplicado. Se houver, `RAISE EXCEPTION` com a quantidade e no máximo 20 ids, nunca geometrias. Nada é alterado;
+    6. `ADD CONSTRAINT mapas_pkey PRIMARY KEY (id)`;
+    7. `setval(pg_get_serial_sequence('public.mapas','id'), GREATEST(max(id), last_value))`. Nunca volta a sequência, e a tabela vazia não mexe nela. `RAISE` se `max(id) > 2147483647 - 1000000`;
+    8. `ALTER COLUMN id SET GENERATED ALWAYS` (Q5);
+    9. `ADD CONSTRAINT ... CHECK (graphy IS NOT NULL OR metry IS NOT NULL) NOT VALID` (RS-13);
+    10. `DROP INDEX IF EXISTS`, só se o índice for de `public.mapas(id)`;
+    11. conferência: PK, sequência ≥ `max(id)`, contagem igual à de antes e `attidentity = 'a'`;
+    12. `COMMIT`.
+  - Idempotência passo a passo:
+    - a PK só conta como existente se for **exata** em `id` (`contype = 'p'`, `conkey` = `attnum` de `id`, `indisvalid`);
+    - outra PK, ou UNIQUE em outra forma, aborta;
+    - cada passo já aplicado é pulado.
+  - O `VALIDATE CONSTRAINT` do CHECK é feito depois, como passo separado, quando o relatório não mostrar linhas vazias.
+  - Relatório à parte (Q6):
+    - roda em `READ ONLY` e não mostra geometria por padrão;
+    - mostra, por id, a contagem de linhas, de linhas com `graphy` e de linhas com `metry`, e a classificação "mesclável" ou "conflitante";
+    - a saída **nunca** vai para o repositório nem para o OneDrive.
+  - Modelo comentado de mescla (Q6):
+    - roda numa transação com `LOCK ... EXCLUSIVE` e reclassifica os ids dentro dela;
+    - faz UPDATE/DELETE por `ctid`, exigindo `rowcount = 1` (senão `RAISE`);
+    - nunca toca nos conflitantes.
+  - Pré-requisitos do usuário/DBA: ver PU-DBA.
+- **D-N4 - Impacto no `database/roles.sql`.**
+  - **Sequência: nenhuma mudança.** O `nextval` da identity não verifica privilégio na sequência; basta o `INSERT` na tabela. Isso já está documentado no próprio `roles.sql` (nota da seção 4.1) e acontece hoje com a `mapas_teste`, que insere sem id e sem GRANT na sequência. Por isso a `api_mapas_escrita` **não precisa de `USAGE`**: a guarda da seção 5 (sequência sem privilégio para as roles da API) e o R-3 continuam iguais. O DataBrain confirma isso num teste no PO3.1.
+  - `api_mapas_escrita`:
+    - `INSERT (graphy, metry)`, sem `id`, porque nenhum INSERT da API informa id;
+    - `SELECT (id, graphy, metry)` (para o `WHERE id` e o `RETURNING id`);
+    - `UPDATE (graphy, metry)`;
+    - **`DELETE` revogado** (Q4).
+  - `mapas_teste` e `api_mapas_leitura`: sem mudança.
+  - RP-2 e seção 5 (ajustado pelo PO2b, RS-15):
+    - a guarda das 3 colunas continua. A guarda C3 passa a exigir `attidentity = 'a'` (Q5);
+    - nova guarda de PK **exata** em `id` (mesmos critérios do D-N3). Sem ela, o script aborta e aponta para a migração: o `roles.sql` revisado deixa de rodar antes da migração, e isso fica documentado;
+    - 4.3: só `SELECT (id, graphy, metry)`, `UPDATE (graphy, metry)` e `INSERT (graphy, metry)`, sem `DELETE`;
+    - 4.5: a matriz espera INSERT em `id` = false e DELETE = false;
+    - os textos do cabeçalho, da 0.1 e da 4.3 são atualizados;
+    - a 5.4, a 5.5 e o CP-14 são ajustados;
+    - a 5.12 sai e o advisory lock sai da 5.11;
+    - nova conferência informativa da sequência na seção 5;
+    - o U-2 fica registrado como encerrado.
+- **D-N5 - Contrato do POST.**
+  - Rotas: `POST /api/mapas/graphy` (só SRID 4326) e `POST /api/mapas/metry` (4326, 4674, 3857, 31983). Constantes de rota novas. `POST /api/mapas/{id}/graphy` continua **405**.
+  - Corpo: objeto único `{"wkt":"...","srid":4326}` (Q1), lido pelo `LeitorCorpoHttp`, sem binding automático (RS-1).
+  - SQL W3/W4, constante por coluna: `INSERT INTO public.mapas (graphy) VALUES (ST_GeomFromText(@wkt, @srid)::geography) RETURNING id` (no `metry`, sem `::geography`). Antes vem a validação no banco (`ST_IsValid`/`GeometryType`) na mesma conexão de escrita. Sem advisory lock, sem UPDATE e sem DELETE.
+  - Sucesso: **201** com `TypedResults.Created`, sem corpo, `Location: /api/mapas/{idGerado}/{coluna}` relativo e montado a partir do int do `RETURNING` (RS-4, RS-25).
+  - Não é idempotente: cada POST cria um id novo, e um retry após 500/timeout pode criar outro. Isso fica documentado (RS-5).
+  - Erros:
+    - 400 `Corpo inválido` e `Geometria inválida` (o `detail` sem índice, porque o corpo tem uma geometria só);
+    - 403 de origem (RS-2);
+    - 413, 415 e 429;
+    - **409** para `55P03` e `40P01`, com os textos do PUT, log Warning e ROLLBACK (RS-18, decisão do orquestrador);
+    - 500 para o `23505` em `mapas_pkey` (log Error só com SqlState e constraint, sem retry; RS-17), para os outros `23505`, para o `23514`, para o prazo de 30 s, para o `57014` e para o pool esgotado.
+    - Não existe 404 nas rotas com a escrita ligada.
+- **D-N6 - Contrato do PUT (uma geometria por id).**
+  - `PUT /api/mapas/{id}/{coluna}`, com o corpo da Q1.
+  - SQL W1/W2 novos: `BEGIN` → `SET LOCAL lock_timeout = '5s'` → `UPDATE public.mapas SET graphy = ... WHERE id = @id` → `COMMIT`.
+  - Resultados: 0 linhas responde **404**, `55P03` responde **409** (mesmos textos) e sucesso responde **204**. Se o `rowcount` for maior que 1, faz ROLLBACK e responde 500 com log Error (RS-19).
+  - O advisory lock 1296125011 sai: o lock de linha do UPDATE pela PK basta.
+  - Preenche a coluna mesmo que estivesse NULL (Q3) e nunca toca a outra coluna. É idempotente.
+  - Não há lista vazia, limpeza nem DELETE (Q4).
+  - Ficam obsoletos o D-P1 e o D-P2, o U-3, o limite de 100 itens e o U-2 (`DELETE` revogado). O D-P3 continua: o PUT não cria id.
+- **D-N7 - Contrato do GET (uma geometria por id).**
+  - Resposta: objeto único (Q2).
+  - 404 com os textos atuais quando não há linha ou quando a coluna é NULL.
+  - Saem `LIMIT 101`, `ORDER BY ctid`, `quantidade` e `truncado`.
+  - O `ApiMapas:LimiteBytesGeometrias` continua como teto do item. Acima dele, a resposta é 500 genérico com log Warning; isso só acontece com dado inserido fora da API, porque a escrita limita o WKT a 10.000 caracteres.
+  - Se a consulta achar 2 linhas (migração ainda não aplicada), a resposta é 500 com log Error próprio. Para isso a consulta usa `LIMIT 2` (RS-23). A migração é pré-requisito também da leitura.
+- **D-N8 - Requisitos do parecer PO2 que continuam valendo (RS-1 a RS-7):**
+  - RS-1: Content-Type estrito com 415 pelo mesmo `LeitorCorpoHttp`, sem binding automático.
+  - RS-2: middleware só nos endpoints de escrita (PUT e POST), **antes do rate limiter**, com ProblemDetails de texto fixo, sem eco do cabeçalho. Os detalhes estão no RS-22.
+  - RS-3: proibido `UseHttpMethodOverride`. Os cabeçalhos de override são ignorados, e um POST com override `PUT`/`DELETE` só faz INSERT.
+  - RS-4: logs com o método (POST ou PUT) e EventIds próprios para o POST. Os eventos 4006 a 4010 passam a dizer "PUT e POST". 201 via `TypedResults.Created`, sem corpo, com `Location` montado a partir do int.
+  - RS-5: o README documenta o crescimento da tabela e do disco (até 10 POST/min por IP, cada um com WKT de no máximo 10.000 caracteres: cerca de 6 MB/h no pior caso) e o retry sem idempotência.
+  - RS-6: testes de 415 com `text/plain`, `application/x-www-form-urlencoded`, `multipart/form-data`, sem Content-Type, lista separada por vírgula, Content-Type duplicado e `charset=latin1`.
+  - RS-7: o Postman e a integração não criam ids fora do controle (D-N12).
+- **D-N9 - Limites.**
+  - PUT e POST dividem o limitador: 10 escritas por minuto por IP, 3 simultâneas, **mais um limitador global de escrita de 10/min, sem partição** (RS-25, decisão do orquestrador), tudo encadeado ao global de 60/min.
+  - Mantidos: prazo de 30 s, pool de escrita 5 e 10.000 caracteres por WKT.
+  - O padrão do `ApiMapas:LimiteBytesCorpoPut` cai para **65.536** bytes, porque o corpo agora tem uma geometria só (a faixa 1..1048576 continua). As chaves não mudam de nome.
+  - Ordem das verificações no POST: 403 → 429 → 415 → 413 → JSON (400) → geometria (400) → banco (400/500/201).
+  - Ordem no PUT: a mesma, com o id (400) logo depois do 429 e o banco respondendo 404/409/204.
+- **D-N10 - Liga/desliga.** Valem as regras do D-P9, com mais condições (RS-20). Na subida, o `VerificadorRoleEscrita` também confere:
+  - a PK exata em `id`;
+  - `DELETE` na tabela;
+  - INSERT em `id`.
+  Se faltar a PK ou sobrar privilégio, a escrita fica **desligada**, com log Warning e `DataSource.Clear()`; o GET continua funcionando. O log de início passa a dizer "Escrita (PUT e POST) HABILITADA/DESLIGADA". Com a escrita desligada, `POST /api/mapas/graphy|metry` responde **404** (a rota não existe) e o PUT responde 405 (RS-21, decisão: aceitar o 404).
+- **D-N11 - `teste_graphy` e `teste_metry`.**
+  - Sem mudança de código prevista. Eles já fazem `INSERT (graphy|metry) ... RETURNING id` sem id, e cada WKT ganha um id próprio, o que é coerente com uma geometria por id. Também funcionam com `GENERATED ALWAYS`. A limpeza dos testes de integração (DELETE por id com `rowcount == 1`) passa a ser garantida pela PK.
+  - Mudanças só de documentação:
+    - os READMEs e a nota S3 ("sem PK") ficam desatualizados;
+    - o `validacao.sql` dos dois ganha uma conferência informativa da PK (DataBrain);
+    - o TestBrain roda de novo as suítes dos dois.
+- **D-N12 - Postman e integração com ids sob controle (RS-7).**
+  - Postman:
+    - os POST ficam numa **coleção separada** (RS-25), fora da execução padrão do CLI;
+    - o script de teste captura o id do `Location` em variáveis de coleção;
+    - o README traz a limpeza (`DELETE ... WHERE id = <capturado>`), feita com a `mapas_teste` religada temporariamente ou com `casaos` local (RS-16);
+    - os PUT usam o `idEscrita` criado antes com a `mapas_teste`.
+  - Integração da `api_mapas`: todo id criado por POST é lido do `Location` e apagado no `finally` com a `mapas_teste`, conferindo `rowcount == 1`.
+
+#### Requisitos do parecer PO2b (RS-8 a RS-26, obrigatórios; o detalhe está em `feito.md`, PO2b)
+- **Banco (DataBrain, PO3):**
+  - RS-8: identity sem `USAGE`, provado nos modos `BY DEFAULT` e `ALWAYS`.
+  - RS-9: C3 com `attidentity = 'a'` e INSERT em `id` = false.
+  - RS-10: migração numa única transação, na ordem do D-N3, com `ON_ERROR_STOP` e `-1`.
+  - RS-12: `setval`, limite de `max(id)` e conferência informativa da sequência.
+  - RS-13: CHECK `NOT VALID` e `VALIDATE` depois do relatório.
+  - RS-14: idempotência com PK exata e `DROP INDEX` restrito.
+  - RS-15: mudanças no `roles.sql` (D-N4).
+  - RS-24: relatório em `READ ONLY` e mescla segura (D-N3).
+  - Documentação do RS-23.
+- **Usuário/DBA:**
+  - RS-11: o primeiro passo do PU-DBA é desligar a escrita antiga; fazer um segundo backup se houver intervalo grande antes da migração.
+  - RS-26: aceitar os riscos residuais R-N1 a R-N5 (tarefa PU-R).
+- **Backend (BackBrain, PO4):**
+  - RS-16: `DELETE` revogado; a limpeza documentada usa `mapas_teste` religada temporariamente ou `casaos` local.
+  - RS-17: `23505` em `mapas_pkey` responde 500, com log Error só com SqlState e constraint, sem retry; `23514` e os outros `23505` também respondem 500.
+  - RS-18: `55P03`/`40P01` no POST respondem 409 com os textos do PUT, log Warning e ROLLBACK.
+  - RS-19: PUT com `rowcount > 1` faz ROLLBACK, responde 500 e registra log Error.
+  - RS-20: `VerificadorRoleEscrita` com PK exata, `DELETE` e INSERT em `id`; com problema, a escrita fica desligada com Warning e `DataSource.Clear()`.
+  - RS-21: com a escrita desligada, o POST responde 404 e o PUT 405.
+  - RS-22: middleware 403 entre `UseStatusCodePages` e `UseRateLimiter`, nunca como filtro, com a metadata também nos POST. Responde 403 para `Origin` presente (qualquer valor), `Sec-Fetch-Site` com mais de um valor, ou `Sec-Fetch-Site` diferente de `none`/`same-origin` (com trim, sem diferenciar maiúsculas). Não lê o corpo, não ecoa nada e registra log Debug sem os valores dos cabeçalhos.
+  - RS-23: GET com `LIMIT 2`; 2 linhas respondem 500 com log Error. A migração é pré-requisito também da leitura.
+  - RS-25: RS-1, RS-3 e RS-6 nas rotas novas; `Location` a partir do `RETURNING`; corpo de 64 KiB; limitador global de escrita de 10/min sem partição; POST do Postman em coleção separada.
+- **QA (TestBrain, PO6):** `55P03` no POST, `rowcount > 1`, 403 sem consumir limite, escrita desligada por privilégio a mais e 415 nas rotas novas.
+
+#### Critérios de aceite (CN-1 a CN-15)
+- CN-1: `POST /api/mapas/graphy` válido responde 201, sem corpo, com `Location: /api/mapas/{n}/graphy`. A linha `n` é nova, tem `graphy` igual ao enviado e `metry` NULL. Nenhuma outra linha muda. Com `metry` é simétrico.
+- CN-2: dois POST iguais criam dois ids distintos (não idempotente). POST simultâneos nunca recebem o mesmo id.
+- CN-3: um POST de `metry` seguido de `PUT /api/mapas/{n}/graphy` deixa uma única linha `n` com as duas colunas (Q3). O GET de cada coluna devolve uma geometria.
+- CN-4: PUT em id sem linha responde 404 e nada é criado. PUT repetido chega ao mesmo estado. A outra coluna nunca muda. Nenhum caminho da API apaga linha (Q4).
+- CN-5: o GET devolve uma geometria no formato da Q2. Sem linha ou com a coluna NULL, responde 404. Com 2 linhas no id (sem migração), responde 500 com log Error.
+- CN-6: as validações do CP-6 e do CP-8, adaptadas ao corpo da Q1, valem para POST e PUT, e nada é gravado. Os 415 do RS-6 estão todos cobertos.
+- CN-7: PUT e POST respondem 403 **sem consumir o rate limit** quando chega `Origin` (qualquer valor), `Sec-Fetch-Site` com mais de um valor, ou `Sec-Fetch-Site` diferente de `none`/`same-origin`. O GET não é afetado (RS-22).
+- CN-8: os limites compartilhados funcionam. A 4ª escrita simultânea responde 429. A 11ª escrita no mesmo minuto também responde 429, tanto no mesmo IP quanto somando todos os IPs (limitador global de escrita), com PUT e POST contados juntos.
+- CN-9: o `23505` (em `mapas_pkey` ou outro) e o `23514` no POST respondem 500 com log Error, sem retry. `55P03`/`40P01` no POST e `55P03` no PUT respondem 409. PUT com `rowcount > 1` responde 500 com ROLLBACK. Falha, cancelamento ou prazo fazem ROLLBACK.
+- CN-10: com escrita desligada (CP-11, sem PK exata, ou `DELETE`/INSERT em `id` sobrando), o POST responde 404, o PUT responde 405 e o log de início diz "Escrita (PUT e POST) DESLIGADA". O GET continua funcionando.
+- CN-11: method override é ignorado (RS-3). `POST /api/mapas/{id}/graphy`, PATCH e DELETE respondem 405 e não gravam. `OPTIONS` não devolve CORS. `Host` malicioso responde 400.
+- CN-12: SQL constante por coluna, parametrizado, sem id explícito em INSERT e sem acesso à sequência; a escrita usa só a conexão de escrita.
+- CN-13: a migração para sem alterar nada quando há duplicado, id NULL, outra PK/UNIQUE ou `max(id)` acima do limite. Quando roda, cria a PK exata, ajusta a sequência (nunca para trás), aplica `GENERATED ALWAYS` e o CHECK `NOT VALID`, e mantém a contagem de linhas. Rodar de novo não faz nada.
+- CN-14: os privilégios conferem com o D-N4: a `api_mapas_escrita` não tem privilégio na sequência e mesmo assim o POST funciona; não tem `DELETE` (Q4). A seção 5 do `roles.sql` não dá alerta.
+- CN-15: cobertura de linhas de pelo menos 80% em `api_mapas`, `teste_graphy` e `teste_metry` (meta: manter cerca de 99%). Postman e READMEs atualizados (PO7).
+
+### PO7 - Fechamento do pedido do POST (analista / SubBrain)
+- Responsável: analista (SubBrain)
+- Concluído em: 2026-10-23. Nada foi executado contra a API nem contra o banco.
+  - `api_mapas/README.md` reescrito para o modelo de uma geometria por id:
+    - aviso da migração como pré-requisito, inclusive da leitura (RS-23);
+    - tabela de rotas com GET, PUT e POST;
+    - condições do U-1 revistas;
+    - escrita desligada: motivos da V1 de 14 colunas e `SemChavePrimaria`, com POST 404 e PUT 405 (RS-21);
+    - `appsettings` (`LimiteBytesCorpoPut` 64 KiB para PUT e POST);
+    - seção "Limitadores", com a ordem da cadeia, o achado 1 do PO5 (`LimiteEscritasPorMinuto` controla o limite por IP e o da API toda) e a limitação conhecida PO6-1 (escrita recusada pela cota gasta 2 permissões do global por IP; aceita, sem correção);
+    - crescimento de disco no padrão 10 e no teto 60 (RS-5);
+    - "403 de origem" (RS-22);
+    - contratos do GET (objeto único), do corpo de escrita, do PUT (UPDATE pela PK, Q3/Q4) e do POST (201 + `Location`, não idempotente, 409/500);
+    - limpeza de ids (RS-16);
+    - logs, `curl`, as duas coleções Postman, testes (PO6) e manual da base;
+    - riscos R-N1 a R-N5 com aceite pendente (PU-R).
+  - `api_mapas/.env.example`: comentário da escrita (PUT e POST; POST 404/PUT 405 desligados; só depois da migração). O `appsettings.json` não mudou (já com 65536) e está documentado no README.
+  - Postman:
+    - `api_mapas/postman/api_mapas.postman_collection.json` regerada: GET com objeto único, pasta `escrita (PUT)` com corpo novo, 10 PUT, 403 de origem e POST 405 na rota com id;
+    - `api_mapas/postman/api_mapas_post.postman_collection.json` nova e separada (RS-25):
+      - só roda com `permitirCriacao=sim`;
+      - captura o id do `Location` em `idCriadoGraphy`/`idCriadoMetry`/`idsCriados`;
+      - PUT na linha criada (Q3), 400, 415 e 403;
+      - imprime os ids e o SQL de limpeza.
+    - Validação de formato sem execução: `postman collection migrate` para v3 no scratchpad e `postman collection lint` com 0 erros e 0 avisos (27 e 11 itens); os 48 scripts passaram na checagem de sintaxe do Node.
+  - `teste_graphy/README.md` e `teste_metry/README.md`: nota S3 atualizada (PK `mapas_pkey` e `GENERATED ALWAYS` depois da migração, sem mudança de código, colunas `pk_exata`/`id_always` do `validacao.sql`).
+  - `database/README.md`: conferido; já estava completo (migração, limpeza, roles revisão 5). Sem mudança.
+  - Kanban: o plano do PO1-R foi movido para este arquivo como referência. Em `afazer.md` ficaram, deste pedido, só o PU-R e o PU-DBA. A ação 5 foi atualizada para "Escrita (PUT e POST)", depois da migração.

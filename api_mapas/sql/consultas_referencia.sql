@@ -1,15 +1,30 @@
 -- =====================================================================
--- api_mapas/sql/consultas_referencia.sql  (A3.1 - A3.4)
--- Alvo: public.mapas (id int4 identity, graphy geography, metry geometry)
--- SOMENTE LEITURA. Nenhum DDL/DML foi executado. Os blocos de indice e
--- GRANT no fim estao COMENTADOS e sao apenas sugestao para o DBA.
+-- api_mapas/sql/consultas_referencia.sql  (A3.1 - A3.4, P3.3, P3.4, PO3.7)
+-- Alvo: public.mapas (id int4 GENERATED ALWAYS AS IDENTITY, PRIMARY KEY
+-- mapas_pkey; graphy geography; metry geometry; CHECK mapas_nao_vazia)
 --
--- Uso na API (A4.3): copiar as consultas Q1/Q2 como constantes, parametro
--- @id com NpgsqlDbType.Integer (Npgsql reescreve @id para $1). Nenhuma
--- concatenacao de texto. A coluna nunca vem do usuario: ha uma constante
--- por endpoint.
+-- Revisao PO3 (2026-10-23, D-N5 a D-N7, RS-17 a RS-23): uma linha por id.
+--   Q1/Q2  GET de UMA geometria por id, com LIMIT 2 (RS-23)   - leitura
+--   W1/W2  PUT: UPDATE da coluna pela PK                       - escrita
+--   W3/W4  POST: INSERT da coluna, id da identity, RETURNING id - escrita
+--   W1.V/W2.V validacao no banco, antes de W1/W3 (graphy) e W2/W4 (metry)
+--   V1     consulta do VerificadorRoleEscrita (RS-20; PO5.C1: 14 colunas) - escrita
+-- PRE-REQUISITO (leitura e escrita): a migracao
+-- database/migracao_mapas_pk.sql aplicada. Sem ela, o mesmo id pode ter
+-- varias linhas: o GET responde 500 (2 linhas) e o verificador desliga a
+-- escrita (sem PK exata).
 --
--- Contrato (AJ-1..AJ-3):
+-- Nenhum DDL/DML foi executado pelo DataBrain no servidor. Os textos
+-- foram conferidos num container postgis/postgis:17-3.5 descartavel.
+--
+-- Uso na API: copiar os textos EXATOS abaixo como constantes, uma por
+-- coluna, escolhida por switch (a coluna nunca vem do usuario e nunca e
+-- concatenada). Parametros (Npgsql reescreve @nome para $n):
+--   @id    NpgsqlDbType.Integer  (id ja validado, 1..2147483647)
+--   @wkt   NpgsqlDbType.Text     (WKT ja validado, ate 10.000 caracteres)
+--   @srid  NpgsqlDbType.Integer  (SRID ja validado pela politica da coluna)
+--
+-- Contrato do GET (Q2 da PU; AJ-1..AJ-3):
 --   tipo      GeometryType (maiusculas: POINT, LINESTRING, POLYGON, MULTI*,
 --             GEOMETRYCOLLECTION; com M aparece o sufixo M, ex. POINTM)
 --   srid      ST_SRID da geometria (graphy normalmente 4326)
@@ -21,24 +36,37 @@
 --   x / y     ST_X/ST_Y nativos, so para POINT; senao NULL
 --   longitude / latitude  ST_X/ST_Y em 4326, so para POINT com srid <> 0;
 --             senao NULL
---   Filtro IS NOT NULL, ORDER BY ctid, LIMIT 101 (101 linhas => truncado).
+--   preenchida  (coluna 8, nova) true se a coluna da rota tem geometria
 --
--- Observacoes (A3.2 / A3.3):
---   * public.mapas NAO tem PK nem UNIQUE em id (S3) e nao ha indice em id:
---     o mesmo id pode ter 1..N linhas e cada consulta faz seq scan.
---   * ctid e a unica ordem estavel disponivel; ela muda apos UPDATE ou
---     VACUUM FULL da linha, portanto a ordem e estavel por leitura, nao
---     um identificador permanente. Nao expor ctid na API.
+-- Observacoes:
 --   * ST_Transform para 4326 depende de 4674/3857/31983 em spatial_ref_sys
 --     (conferido em M3.3). SRID 0 nao passa por ST_Transform (CASE).
 --   * CASE do PostgreSQL so avalia o ramo escolhido por linha, entao o
---     ST_Transform nunca roda para SRID 0.
+--     ST_Transform nunca roda para SRID 0 (nem para geometria NULL).
 -- =====================================================================
 
 
 -- ---------------------------------------------------------------------
--- Q1 - GET /api/mapas/{id}/graphy   (constante na API, parametro @id)
+-- Q1 - GET /api/mapas/{id}/graphy   (conexao api_mapas_leitura, @id)
+-- Q2 - GET /api/mapas/{id}/metry
 -- ---------------------------------------------------------------------
+-- D-N7 / RS-23. A subconsulta busca as linhas do id SEM filtrar a coluna
+-- (assim um id duplicado e detectado mesmo que so uma linha tenha a
+-- coluna) e com LIMIT 2 (basta saber se ha mais de uma). Resultado, nesta
+-- ordem:
+--   0 linhas                   -> 404 "Mapa nao encontrado"
+--   2 linhas                   -> 500 generico + log Error proprio
+--                                 (migracao nao aplicada; RS-23)
+--   1 linha, preenchida = f    -> 404 "Mapa nao encontrado" (coluna NULL)
+--   1 linha, preenchida = t    -> 200 com o objeto unico (Q2 da PU)
+-- Ler "preenchida" (indice 8) ANTES das demais colunas: com a coluna NULL
+-- as colunas 0 a 7 vem NULL. O teto ApiMapas:LimiteBytesGeometrias vale
+-- para o item (acima dele: 500 com log Warning).
+-- Sem ORDER BY: com a PK ha no maximo 1 linha; com 2 linhas a resposta e
+-- erro, entao a ordem nao importa. Com a tabela grande o planner usa o
+-- indice de mapas_pkey; com poucas linhas pode preferir seq scan.
+
+-- Q1 (graphy)
 SELECT GeometryType(t.g)                                        AS tipo,
        ST_SRID(t.g)                                             AS srid,
        ST_AsText(t.g)                                           AS wkt,
@@ -52,19 +80,14 @@ SELECT GeometryType(t.g)                                        AS tipo,
        CASE WHEN GeometryType(t.g) = 'POINT' AND ST_SRID(t.g) <> 0
             THEN ST_X(ST_Transform(t.g, 4326)) END              AS longitude,
        CASE WHEN GeometryType(t.g) = 'POINT' AND ST_SRID(t.g) <> 0
-            THEN ST_Y(ST_Transform(t.g, 4326)) END              AS latitude
-FROM (SELECT m.ctid AS linha, m.graphy::geometry AS g
+            THEN ST_Y(ST_Transform(t.g, 4326)) END              AS latitude,
+       (t.g IS NOT NULL)                                        AS preenchida
+FROM (SELECT m.graphy::geometry AS g
       FROM public.mapas AS m
       WHERE m.id = @id
-        AND m.graphy IS NOT NULL
-      ORDER BY m.ctid
-      LIMIT 101) AS t
-ORDER BY t.linha;
+      LIMIT 2) AS t;
 
-
--- ---------------------------------------------------------------------
--- Q2 - GET /api/mapas/{id}/metry   (constante na API, parametro @id)
--- ---------------------------------------------------------------------
+-- Q2 (metry)
 SELECT GeometryType(t.g)                                        AS tipo,
        ST_SRID(t.g)                                             AS srid,
        ST_AsText(t.g)                                           AS wkt,
@@ -78,14 +101,12 @@ SELECT GeometryType(t.g)                                        AS tipo,
        CASE WHEN GeometryType(t.g) = 'POINT' AND ST_SRID(t.g) <> 0
             THEN ST_X(ST_Transform(t.g, 4326)) END              AS longitude,
        CASE WHEN GeometryType(t.g) = 'POINT' AND ST_SRID(t.g) <> 0
-            THEN ST_Y(ST_Transform(t.g, 4326)) END              AS latitude
-FROM (SELECT m.ctid AS linha, m.metry AS g
+            THEN ST_Y(ST_Transform(t.g, 4326)) END              AS latitude,
+       (t.g IS NOT NULL)                                        AS preenchida
+FROM (SELECT m.metry AS g
       FROM public.mapas AS m
       WHERE m.id = @id
-        AND m.metry IS NOT NULL
-      ORDER BY m.ctid
-      LIMIT 101) AS t
-ORDER BY t.linha;
+      LIMIT 2) AS t;
 
 
 -- ---------------------------------------------------------------------
@@ -100,7 +121,7 @@ ORDER BY t.linha;
 
 
 -- ---------------------------------------------------------------------
--- Verificacoes opcionais (somente leitura, NAO executadas pelo DataBrain)
+-- Verificacoes opcionais (somente leitura, NAO executadas no servidor)
 -- ---------------------------------------------------------------------
 -- A3.2 SRIDs necessarios para ST_Transform (esperado: 4 linhas EPSG)
 -- SELECT srid, auth_name, auth_srid FROM spatial_ref_sys
@@ -115,70 +136,157 @@ ORDER BY t.linha;
 --              (4674, -46.6333, -23.5505), (3857, -5191195.21, -2698729.46),
 --              (31983, 333250, 7394600)) AS s(srid, x, y);
 --
--- A3.3 Constraints e indices em public.mapas (esperado: nenhuma linha)
--- SELECT conname, contype FROM pg_constraint
+-- Constraints e indices em public.mapas. Esperado depois da migracao:
+-- mapas_pkey (p) e mapas_nao_vazia (c); indice so o mapas_pkey.
+-- SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint
 -- WHERE conrelid = 'public.mapas'::regclass;
 -- SELECT indexname, indexdef FROM pg_indexes
 -- WHERE schemaname = 'public' AND tablename = 'mapas';
+--
+-- (A sugestao antiga de indice ix_mapas_id ficou obsoleta: a PK ja cria o
+-- indice em id, e a migracao remove o ix_mapas_id se ele existir.)
 
 
 -- ---------------------------------------------------------------------
--- SUGESTAO (A3.3) - NAO EXECUTAR sem aprovacao do usuario/DBA.
--- Indice B-tree em id para evitar seq scan (id nao e unico, por isso nao
--- e UNIQUE/PK). CONCURRENTLY nao bloqueia escrita; nao roda em transacao.
+-- SUBSTITUIDO (P3.4): a FONTE OFICIAL das roles api_mapas_leitura,
+-- api_mapas_escrita e mapas_teste e database/roles.sql (revisao 5 no
+-- PO3). Usar SOMENTE aquele script. Procedimento do DBA:
+-- database/README.md. O bloco historico da A3.4 que ficava aqui foi
+-- removido por estar desatualizado.
 -- ---------------------------------------------------------------------
--- CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_mapas_id
---     ON public.mapas USING btree (id);
 
 
+-- =====================================================================
+-- ESCRITA - PUT /api/mapas/{id}/graphy|metry e POST /api/mapas/graphy|metry
+-- (D-N5, D-N6; RS-17, RS-18, RS-19; CN-9, CN-12)
+-- =====================================================================
+-- Conexao: SOMENTE a de escrita (role api_mapas_escrita, PG_ESCRITA_*).
+-- O GET (Q1/Q2) continua so na conexao de leitura.
+-- Privilegios usados (database/roles.sql 4.3, revisao 5): SELECT (id,
+-- graphy, metry), UPDATE (graphy, metry), INSERT (graphy, metry). Sem
+-- DELETE, sem INSERT em id, nada na sequencia. Sem advisory lock (saiu
+-- com a PK; o lock de linha do UPDATE pela PK basta).
+--
+-- Mensagens: a role tem client_min_messages = warning (roles.sql, RP-3),
+-- entao os NOTICE do ST_IsValid (que citam coordenadas do WKT) nao chegam
+-- ao cliente. Mesmo assim, a API nunca registra MessageText/Detail/Hint.
+--
 -- ---------------------------------------------------------------------
--- SUBSTITUIDO: a fonte oficial da role api_mapas_leitura (e da
--- mapas_teste) agora e database/roles.sql, revisado pelo SecBrain
--- (C1-C5, R1-R8). Usar SOMENTE aquele script; ele ja inclui guardas,
--- idempotencia, idle_in_transaction_session_timeout e a conferencia.
--- Ainda NAO foi executado no banco: fica a cargo do DBA (acao 4).
--- O bloco abaixo fica apenas como REFERENCIA HISTORICA da A3.4 - NAO
--- EXECUTAR (esta desatualizado em relacao a database/roles.sql).
+-- Etapa 1 - Validacao no banco, ANTES de abrir a transacao, na mesma
+-- conexao de escrita (D-P6, RP-4). Uma geometria por requisicao: um
+-- comando simples (sem lote). Erros esperados: XX000 (parse do WKT; SRID
+-- que nao e lon/lat no cast para geography) e classe 22 (dados
+-- invalidos) -> 400 "Geometria invalida" (sem indice). So o SqlState vai
+-- para o log. Resultado: 1 linha (valida boolean, tipo text).
+--   valida = false            -> 400 "geometria invalida segundo o PostGIS (ST_IsValid)"
+--   tipo <> tipo do WKT local -> 400 "tipo devolvido pelo banco diverge do WKT"
 -- ---------------------------------------------------------------------
--- SUGESTAO (A3.4, ajustada por RA-1/RA-2 do SecBrain na A2)
--- NAO EXECUTAR sem aprovacao do usuario/DBA.
--- Role somente leitura para a API (D-A4 / CA-5). Ajustada por O1/O2/R6
--- do SecBrain na A6. Nunca gravar senha real neste arquivo nem no codigo
--- (vai em PG_PASSWORD, fora do repo).
+-- W1.V (graphy; usada pelo PUT W1 e pelo POST W3) - o cast
+-- ::geography::geometry faz o erro de conversao para geography aparecer
+-- AQUI, e nao no UPDATE/INSERT. ATENCAO (PostGIS 3.5.2): o cast para
+-- geography NAO falha com longitude/latitude fora de [-180,180]/[-90,90];
+-- a faixa e responsabilidade do validador local (D-P5), que roda antes.
+SELECT ST_IsValid(v.g) AS valida, GeometryType(v.g) AS tipo FROM (SELECT ST_GeomFromText(@wkt, @srid)::geography::geometry AS g) AS v;
+--
+-- W2.V (metry; usada pelo PUT W2 e pelo POST W4)
+SELECT ST_IsValid(v.g) AS valida, GeometryType(v.g) AS tipo FROM (SELECT ST_GeomFromText(@wkt, @srid) AS g) AS v;
+--
 -- ---------------------------------------------------------------------
--- R6: antes de tudo, conferir a versao do PostgreSQL:
--- SHOW server_version;
--- Se for < 15, o schema public ainda concede CREATE a PUBLIC. Avaliar
--- REVOKE CREATE ON SCHEMA public FROM PUBLIC; SOMENTE apos inventariar as
--- roles que criam objetos em public (CasaOS/outros apps podem depender).
+-- Etapa 2 - Transacao (READ COMMITTED), nesta ordem exata:
+--   BEGIN (BeginTransaction(IsolationLevel.ReadCommitted))
+--   -> W*.1 SET LOCAL lock_timeout = '5s'   (RP-3; logo depois do BEGIN)
+--   -> W*.2 UPDATE (PUT) ou INSERT ... RETURNING id (POST)
+--   -> COMMIT
+-- Qualquer erro, cancelamento ou prazo de 30 s estourado -> ROLLBACK.
+-- ---------------------------------------------------------------------
 --
--- RA-1: role dedicada, sem privilegios administrativos
--- O2: CONNECTION LIMIT alinhado ao pool da API (Maximum Pool Size = 20)
--- O1: sem clausula PASSWORD (evita senha em texto puro no historico/log)
--- CREATE ROLE api_mapas_leitura LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
---     NOBYPASSRLS NOINHERIT CONNECTION LIMIT 20;
--- O1: definir a senha SOMENTE via psql (o cliente envia o hash, nao o texto):
--- \password api_mapas_leitura
--- ATENCAO: sem o \password a role fica sem senha e NAO autentica por senha.
+-- ---------------- W1 - PUT /api/mapas/{id}/graphy -------------------
+-- W1.1
+SET LOCAL lock_timeout = '5s';
+-- W1.2
+UPDATE public.mapas SET graphy = ST_GeomFromText(@wkt, @srid)::geography WHERE id = @id;
 --
--- RA-1: privilegio minimo (CONNECT na base, USAGE no schema, SELECT so em mapas)
--- ALERTA: o REVOKE abaixo e um no-op defensivo (a role nova nao tem grants
--- diretos na base). NUNCA trocar por "FROM PUBLIC": isso removeria CONNECT/
--- TEMP de todas as roles e derrubaria o CasaOS e os outros apps da base.
--- REVOKE ALL ON DATABASE casaos FROM api_mapas_leitura;
--- GRANT CONNECT ON DATABASE casaos TO api_mapas_leitura;
--- GRANT USAGE ON SCHEMA public TO api_mapas_leitura;
--- GRANT SELECT ON public.mapas TO api_mapas_leitura;
--- -- spatial_ref_sys ja e legivel por PUBLIC na instalacao padrao do PostGIS
--- -- (necessario para ST_Transform); conferir com:
--- -- SELECT has_table_privilege('api_mapas_leitura', 'public.spatial_ref_sys', 'SELECT');
+-- ---------------- W2 - PUT /api/mapas/{id}/metry --------------------
+-- W2.1
+SET LOCAL lock_timeout = '5s';
+-- W2.2
+UPDATE public.mapas SET metry = ST_GeomFromText(@wkt, @srid) WHERE id = @id;
 --
--- RA-2: sessao somente leitura e limite de tempo por consulta
--- ALTER ROLE api_mapas_leitura SET default_transaction_read_only = on;
--- ALTER ROLE api_mapas_leitura SET statement_timeout = '15s';
+-- Resultado de W1.2/W2.2 (rows affected) - D-N6, RS-19:
+--   0  -> ROLLBACK, 404 "Mapa nao encontrado" (o PUT nunca cria id, D-P3)
+--   1  -> COMMIT, 204
+--   >1 -> ROLLBACK, 500 generico + log Error (so possivel sem a PK)
+--   55P03 (lock de linha > 5 s) -> ROLLBACK, 409 "Atualizacao concorrente"
+-- So muda a coluna da rota; a outra coluna da linha nunca e tocada. Pode
+-- preencher uma coluna que estava NULL (Q3). Idempotente.
 --
--- Conferencia (somente leitura):
--- SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls, rolconfig
--- FROM pg_roles WHERE rolname = 'api_mapas_leitura';
--- SELECT has_table_privilege('api_mapas_leitura', 'public.mapas', 'SELECT')  AS pode_ler,
---        has_table_privilege('api_mapas_leitura', 'public.mapas', 'INSERT')  AS pode_inserir;
+-- ---------------- W3 - POST /api/mapas/graphy -----------------------
+-- W3.1
+SET LOCAL lock_timeout = '5s';
+-- W3.2
+INSERT INTO public.mapas (graphy) VALUES (ST_GeomFromText(@wkt, @srid)::geography) RETURNING id;
+--
+-- ---------------- W4 - POST /api/mapas/metry ------------------------
+-- W4.1
+SET LOCAL lock_timeout = '5s';
+-- W4.2
+INSERT INTO public.mapas (metry) VALUES (ST_GeomFromText(@wkt, @srid)) RETURNING id;
+--
+-- Resultado de W3.2/W4.2 (D-N5; RS-17, RS-18):
+--   1 linha (id int4) -> COMMIT, 201, Location /api/mapas/{id}/{coluna},
+--                        montado a partir do int do RETURNING
+--   23505 em mapas_pkey (PostgresException.ConstraintName) -> ROLLBACK,
+--         500 + log Error so com SqlState e constraint, SEM retry (id da
+--         sequencia ja usado: INSERT manual com OVERRIDING SYSTEM VALUE a
+--         frente dela, R-N3; o DBA corrige com o passo 7 da migracao)
+--   23505 em outra constraint, 23514 (CHECK, ex.: mapas_nao_vazia) -> 500
+--   55P03 / 40P01 -> ROLLBACK, 409 com os textos do PUT, log Warning
+--   57014, prazo de 30 s, pool esgotado -> 500
+-- A outra coluna fica NULL. Nao e idempotente: cada POST gera id novo e
+-- consome um valor da sequencia, mesmo com ROLLBACK (pode haver lacunas
+-- nos ids; isso e normal).
+--
+-- Notas:
+--   * O INSERT nao informa id: a coluna e GENERATED ALWAYS e o valor vem
+--     da identity, que nao exige privilegio na sequencia (RS-8,
+--     database/prova_identity_sem_usage.sql). Um id explicito falharia
+--     com 428C9 (sem OVERRIDING) ou 42501 (sem INSERT em id).
+--   * Teste manual no psql: os textos acima nao rodam direto no psql (o
+--     @nome e do Npgsql). Para testar, trocar @id/@wkt/@srid por valores
+--     literais, dentro de BEGIN ... ROLLBACK.
+-- =====================================================================
+
+
+-- =====================================================================
+-- V1 - VerificadorRoleEscrita (RS-20, D-N10), na conexao de ESCRITA,
+-- uma vez na subida. SQL constante, sem parametros, so catalogo.
+-- =====================================================================
+-- Substitui SqlAtributosRole: as colunas 0 a 5 sao as mesmas de hoje
+-- (R-1/C4); 6 a 9 vieram na PO3; 10 a 13 vieram na PO5.C1 (achado 3 do
+-- SecBrain), depois das antigas, sem mudar os indices 0 a 9.
+-- A escrita fica HABILITADA so se:
+--   colunas 0 a 7 = false  E  colunas 8 e 9 = true  E  colunas 10 a 13 = false.
+-- Qualquer outro resultado (ou nenhuma linha, ou erro) -> escrita
+-- DESLIGADA com log Warning e DataSource.Clear(); o GET continua.
+--   0 rolsuper        1 rolbypassrls     2 rolcreaterole
+--   3 pode_truncate   4 escreve_tudo (pg_write_all_data)
+--   5 dona_tabela
+--   6 pode_delete     DELETE em public.mapas (revogado, Q4)
+--   7 insere_id       INSERT na coluna id (RS-9)
+--   8 pk_exata        PK mapas_pkey exata em id (mesmos criterios da
+--                     migracao e da guarda 0.2 do roles.sql)
+--   9 id_always       id GENERATED ALWAYS (attidentity = 'a'; Q5).
+--                     Coluna recomendada pelo DataBrain alem do RS-20:
+--                     confirma que a migracao terminou (passo 8).
+--  10 atualiza_id    UPDATE na coluna id (direto na coluna ou herdado de
+--                    UPDATE na tabela inteira); o roles.sql so da
+--                    UPDATE (graphy, metry)
+--  11 rolcreatedb    CREATEDB
+--  12 rolreplication REPLICATION
+--  13 membro_de_role a role e membro de QUALQUER outra role
+--                    (pg_auth_members.member = oid da role; o roles.sql
+--                    garante 0 memberships, C2(a) e 5.3)
+-- Todas as colunas sao boolean NOT NULL (has_*_privilege e EXISTS nunca
+-- devolvem NULL aqui; "= 'a'" sobre attidentity tambem nao).
+SELECT r.rolsuper, r.rolbypassrls, r.rolcreaterole, has_table_privilege(current_user, 'public.mapas', 'TRUNCATE') AS pode_truncate, pg_has_role(current_user, 'pg_write_all_data', 'USAGE') AS escreve_tudo, EXISTS (SELECT 1 FROM pg_catalog.pg_class AS c WHERE c.oid = 'public.mapas'::regclass AND c.relowner = r.oid) AS dona_tabela, has_table_privilege(current_user, 'public.mapas', 'DELETE') AS pode_delete, has_column_privilege(current_user, 'public.mapas', 'id', 'INSERT') AS insere_id, EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS k JOIN pg_catalog.pg_index AS i ON i.indexrelid = k.conindid JOIN pg_catalog.pg_attribute AS a ON a.attrelid = k.conrelid AND a.attname = 'id' AND NOT a.attisdropped WHERE k.conrelid = 'public.mapas'::regclass AND k.contype = 'p' AND k.conname = 'mapas_pkey' AND k.conkey = ARRAY[a.attnum] AND NOT k.condeferrable AND i.indisvalid AND i.indisready AND i.indisunique AND i.indisprimary AND i.indpred IS NULL AND i.indexprs IS NULL) AS pk_exata, EXISTS (SELECT 1 FROM pg_catalog.pg_attribute AS a WHERE a.attrelid = 'public.mapas'::regclass AND a.attname = 'id' AND NOT a.attisdropped AND a.attidentity = 'a') AS id_always, has_column_privilege(current_user, 'public.mapas', 'id', 'UPDATE') AS atualiza_id, r.rolcreatedb, r.rolreplication, EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members AS m WHERE m.member = r.oid) AS membro_de_role FROM pg_catalog.pg_roles AS r WHERE r.rolname = current_user;
+-- =====================================================================

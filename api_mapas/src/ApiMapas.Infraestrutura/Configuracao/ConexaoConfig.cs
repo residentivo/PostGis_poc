@@ -104,6 +104,18 @@ public sealed class ConexaoConfig
     public override string ToString() => Descricao();
 
     /// <summary>
+    /// RP-8: true quando <paramref name="usuario"/> e o mesmo usuario da leitura (depois do Trim,
+    /// sem diferenciar maiusculas). Nao expoe o usuario.
+    /// </summary>
+    internal bool UsuarioIgual(string usuario) =>
+        string.Equals(_usuario.Trim(), usuario.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>RP-8: true quando <paramref name="senha"/> e igual a senha da leitura (comparacao em tempo constante).</summary>
+    internal bool SenhaIgual(string senha) =>
+        System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(_senha), System.Text.Encoding.UTF8.GetBytes(senha));
+
+    /// <summary>
     /// Monta a connection string. CONTEM A SENHA: nunca exibir nem logar.
     /// Sem IncludeErrorDetail e sem TrustServerCertificate (RA-6/RA-8); Persist Security Info = false (RA-9).
     /// </summary>

@@ -24,6 +24,9 @@ public abstract record RespostaFalsa
 
     /// <summary>Primeira coluna declarada como int4 (o repositorio faz GetString -> InvalidCastException).</summary>
     public sealed record TipoErrado : RespostaFalsa;
+
+    /// <summary>Uma linha com a coluna da rota NULL: colunas 0 a 7 NULL e preenchida = false (D-N7).</summary>
+    public sealed record ColunaVazia : RespostaFalsa;
 }
 
 /// <summary>
@@ -37,6 +40,7 @@ public sealed class ServidorPostgresFalso : IAsyncDisposable
     private const int OidText = 25;
     private const int OidInt4 = 23;
     private const int OidFloat8 = 701;
+    private const int OidBool = 16;
 
     private readonly TcpListener _ouvinte;
     private readonly Func<ConsultaRecebida, RespostaFalsa> _responder;
@@ -255,6 +259,7 @@ public sealed class ServidorPostgresFalso : IAsyncDisposable
         {
             ("tipo", tipoErrado ? OidInt4 : OidText, (short)(tipoErrado ? 4 : -1)), ("srid", OidInt4, 4), ("wkt", OidText, -1), ("geojson", OidText, -1),
             ("x", OidFloat8, 8), ("y", OidFloat8, 8), ("longitude", OidFloat8, 8), ("latitude", OidFloat8, 8),
+            ("preenchida", OidBool, 1),
         };
         Escrever(saida, 'T', b =>
         {
@@ -265,18 +270,36 @@ public sealed class ServidorPostgresFalso : IAsyncDisposable
             }
         });
 
-        IReadOnlyList<GeometriaMapa> linhas = resposta switch
+        IReadOnlyList<GeometriaMapa?> linhas = resposta switch
         {
-            RespostaFalsa.Linhas l => l.Itens,
+            RespostaFalsa.Linhas l => (IReadOnlyList<GeometriaMapa?>)l.Itens,
             RespostaFalsa.ErroDuranteLeitura e => e.Antes,
+            RespostaFalsa.ColunaVazia => new GeometriaMapa?[] { null },
             _ => new[] { Geometrias.Ponto() },
         };
 
-        foreach (var g in linhas)
+        foreach (var linha in linhas)
         {
+            if (linha is null)
+            {
+                // Coluna da rota NULL: 0 a 7 NULL e preenchida = false.
+                Escrever(saida, 'D', b =>
+                {
+                    b.Int16(9);
+                    for (var i = 0; i < 8; i++)
+                    {
+                        b.Int32(-1);
+                    }
+
+                    b.Celula(new byte[] { 0 }, Formato(8) == 1 ? null : "f");
+                });
+                continue;
+            }
+
+            var g = linha;
             Escrever(saida, 'D', b =>
             {
-                b.Int16(8);
+                b.Int16(9);
                 if (tipoErrado)
                 {
                     b.Celula(BitConverterBE(1), Formato(0) == 1 ? null : "1");
@@ -306,6 +329,8 @@ public sealed class ServidorPostgresFalso : IAsyncDisposable
                         b.CelulaTexto(v.Value.ToString("R", CultureInfo.InvariantCulture));
                     }
                 }
+
+                b.Celula(new byte[] { 1 }, Formato(8) == 1 ? null : "t");
             });
         }
 

@@ -9,11 +9,11 @@ namespace ApiMapas.Tests.Infraestrutura;
 
 /// <summary>
 /// MapasRepository real (Npgsql) contra o mock do protocolo PostgreSQL em 127.0.0.1 (porta efemera).
-/// Nenhum banco real e acessado.
+/// Nenhum banco real e acessado. Ajustado no PO4 ao modelo de uma geometria por id (D-N7, RS-23).
 /// </summary>
 public class MapasRepositoryProtocoloTests
 {
-    private static async Task<(List<GeometriaMapa> Itens, LoggerMemoria<MapasRepository> Log, ServidorPostgresFalso Servidor)> ListarAsync(
+    private static async Task<(LeituraMapa Leitura, LoggerMemoria<MapasRepository> Log, ServidorPostgresFalso Servidor)> ObterAsync(
         RespostaFalsa resposta, ColunaMapa coluna, string id = "1")
     {
         var servidor = new ServidorPostgresFalso(_ => resposta);
@@ -22,20 +22,15 @@ public class MapasRepositoryProtocoloTests
         var repo = new MapasRepository(ds, log);
         IdMapa.TentarCriar(id, out var idMapa);
 
-        var itens = new List<GeometriaMapa>();
         try
         {
-            await foreach (var g in repo.ListarPorIdAsync(idMapa, coluna, CancellationToken.None))
-            {
-                itens.Add(g);
-            }
+            var leitura = await repo.ObterPorIdAsync(idMapa, coluna, CancellationToken.None);
+            return (leitura, log, servidor);
         }
         finally
         {
             await servidor.DisposeAsync();
         }
-
-        return (itens, log, servidor);
     }
 
     [Theory]
@@ -43,41 +38,53 @@ public class MapasRepositoryProtocoloTests
     [InlineData(ColunaMapa.Metry, "m.metry AS g", "2147483647", 2147483647)]
     public async Task Envia_SqlConstante_ComParametroInt4(ColunaMapa coluna, string trecho, string id, int esperado)
     {
-        var (itens, _, servidor) = await ListarAsync(new RespostaFalsa.Linhas(Array.Empty<GeometriaMapa>()), coluna, id);
+        var (leitura, _, servidor) = await ObterAsync(new RespostaFalsa.Linhas(Array.Empty<GeometriaMapa>()), coluna, id);
 
-        Assert.Empty(itens);
+        Assert.Same(LeituraMapa.NaoEncontrada.Instancia, leitura);
         var consulta = Assert.Single(servidor.Consultas);
         Assert.Contains(trecho, consulta.Sql, StringComparison.Ordinal);
         Assert.Contains("WHERE m.id = $1", consulta.Sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 2", consulta.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("@id", consulta.Sql, StringComparison.Ordinal);
         Assert.Equal(new[] { 23 }, consulta.OidsParametros); // 23 = int4
         Assert.Equal(esperado, consulta.ValorId);
         Assert.Empty(servidor.ErrosInternos);
     }
 
-    public static TheoryData<int, int> Quantidades => new() { { 1, 1 }, { 3, 3 }, { 101, 101 } };
-
-    [Theory]
-    [MemberData(nameof(Quantidades))]
-    public async Task LeLinhas_NaOrdem_ComNulos(int quantidade, int esperado)
+    [Fact]
+    public async Task UmaLinha_Encontrada_ComNulos()
     {
-        var linhas = Geometrias.Pontos(quantidade - 1).Prepend(Geometrias.Poligono()).ToList();
+        var (leitura, log, _) = await ObterAsync(new RespostaFalsa.Linhas(new[] { Geometrias.Poligono() }), ColunaMapa.Graphy);
 
-        var (itens, log, _) = await ListarAsync(new RespostaFalsa.Linhas(linhas), ColunaMapa.Graphy);
-
-        Assert.Equal(esperado, itens.Count);
-        Assert.Equal(linhas, itens);
-        Assert.Null(itens[0].X);
-        Assert.Contains(log.Entradas, e => e.Evento.Id == 2003 && e.Mensagem.Contains($"{esperado} linha", StringComparison.Ordinal));
+        var g = Assert.IsType<LeituraMapa.Encontrada>(leitura).Geometria;
+        Assert.Equal(Geometrias.Poligono(), g);
+        Assert.Null(g.X);
+        Assert.Contains(log.Entradas, e => e.Evento.Id == 2003);
         Assert.Contains(log.Entradas, e => e.Evento.Id == 2004); // conexao devolvida
+    }
+
+    [Fact]
+    public async Task DuasLinhas_Duplicada()
+    {
+        var (leitura, _, _) = await ObterAsync(new RespostaFalsa.Linhas(Geometrias.Pontos(2).ToList()), ColunaMapa.Metry);
+
+        Assert.Same(LeituraMapa.Duplicada.Instancia, leitura);
+    }
+
+    [Fact]
+    public async Task ColunaNula_ColunaVazia()
+    {
+        var (leitura, _, _) = await ObterAsync(new RespostaFalsa.ColunaVazia(), ColunaMapa.Metry);
+
+        Assert.Same(LeituraMapa.ColunaVazia.Instancia, leitura);
     }
 
     [Fact]
     public async Task PontoSrid0_LongitudeLatitudeNulas()
     {
-        var (itens, _, _) = await ListarAsync(new RespostaFalsa.Linhas(new[] { Geometrias.Ponto(0, 333000.5, 7394000.25) }), ColunaMapa.Metry);
+        var (leitura, _, _) = await ObterAsync(new RespostaFalsa.Linhas(new[] { Geometrias.Ponto(0, 333000.5, 7394000.25) }), ColunaMapa.Metry);
 
-        var g = Assert.Single(itens);
+        var g = Assert.IsType<LeituraMapa.Encontrada>(leitura).Geometria;
         Assert.Equal(0, g.Srid);
         Assert.Equal(333000.5, g.X);
         Assert.Null(g.Longitude);
@@ -88,10 +95,10 @@ public class MapasRepositoryProtocoloTests
     [InlineData("42501", "permission denied for table mapas")]
     [InlineData("57014", "canceling statement due to statement timeout")]
     [InlineData("42P01", "relation \"public.mapas\" does not exist")]
-    public async Task ErroNaExecucao_PostgresException_LogaSqlStateSemDetalhe(string sqlState, string mensagem)
+    public async Task ErroNaExecucao_PostgresException(string sqlState, string mensagem)
     {
         var ex = await Assert.ThrowsAsync<PostgresException>(() =>
-            ListarAsync(new RespostaFalsa.ErroNaExecucao(sqlState, mensagem), ColunaMapa.Graphy));
+            ObterAsync(new RespostaFalsa.ErroNaExecucao(sqlState, mensagem), ColunaMapa.Graphy));
 
         Assert.Equal(sqlState, ex.SqlState);
     }
@@ -105,16 +112,10 @@ public class MapasRepositoryProtocoloTests
         var log = new LoggerMemoria<MapasRepository>();
         IdMapa.TentarCriar("5", out var id);
 
-        await Assert.ThrowsAsync<PostgresException>(async () =>
-        {
-            await foreach (var _ in new MapasRepository(ds, log).ListarPorIdAsync(id, ColunaMapa.Metry, CancellationToken.None))
-            {
-            }
-        });
+        await Assert.ThrowsAsync<PostgresException>(() => new MapasRepository(ds, log).ObterPorIdAsync(id, ColunaMapa.Metry, CancellationToken.None));
 
         var falha = Assert.Single(log.Entradas, e => e.Evento.Id == 2005);
         Assert.Equal(LogLevel.Error, falha.Nivel);
-        Assert.Contains("abrir conexao/executar consulta", falha.Mensagem, StringComparison.Ordinal);
         Assert.Contains("SqlState 42501", falha.Mensagem, StringComparison.Ordinal);
         Assert.Contains("PostgresException", falha.Mensagem, StringComparison.Ordinal);
         Assert.Contains(log.Entradas, e => e.Evento.Id == 2004); // conexao liberada mesmo com erro
@@ -122,25 +123,18 @@ public class MapasRepositoryProtocoloTests
     }
 
     [Fact]
-    public async Task ErroDuranteLeitura_PropagaDepoisDasLinhas_LogEtapaLerLinhas()
+    public async Task ErroDuranteLeitura_Propaga_LogEtapaLerLinhas()
     {
-        var servidor = new ServidorPostgresFalso(_ => new RespostaFalsa.ErroDuranteLeitura(Geometrias.Pontos(2).ToList(), "XX000", "falha interna"));
+        var servidor = new ServidorPostgresFalso(_ => new RespostaFalsa.ErroDuranteLeitura(Geometrias.Pontos(1).ToList(), "XX000", "falha interna"));
         await using var _s = servidor;
         await using var ds = NpgsqlDataSource.Create(servidor.ConnectionString);
         var log = new LoggerMemoria<MapasRepository>();
         IdMapa.TentarCriar("5", out var id);
-        var lidos = 0;
 
-        var ex = await Assert.ThrowsAsync<PostgresException>(async () =>
-        {
-            await foreach (var _ in new MapasRepository(ds, log).ListarPorIdAsync(id, ColunaMapa.Graphy, CancellationToken.None))
-            {
-                lidos++;
-            }
-        });
+        var ex = await Assert.ThrowsAsync<PostgresException>(() =>
+            new MapasRepository(ds, log).ObterPorIdAsync(id, ColunaMapa.Graphy, CancellationToken.None));
 
         Assert.Equal("XX000", ex.SqlState);
-        Assert.Equal(2, lidos);
         Assert.Contains(log.Entradas, e => e.Evento.Id == 2005 && e.Mensagem.Contains("ler linhas", StringComparison.Ordinal));
     }
 
@@ -153,22 +147,18 @@ public class MapasRepositoryProtocoloTests
         var log = new LoggerMemoria<MapasRepository>();
         IdMapa.TentarCriar("5", out var id);
 
-        await Assert.ThrowsAsync<InvalidCastException>(async () =>
-        {
-            await foreach (var _ in new MapasRepository(ds, log).ListarPorIdAsync(id, ColunaMapa.Graphy, CancellationToken.None))
-            {
-            }
-        });
+        await Assert.ThrowsAsync<InvalidCastException>(() =>
+            new MapasRepository(ds, log).ObterPorIdAsync(id, ColunaMapa.Graphy, CancellationToken.None));
 
         Assert.Contains(log.Entradas, e => e.Evento.Id == 2005 && e.Mensagem.Contains("InvalidCastException", StringComparison.Ordinal));
     }
 
-    /// <summary>Servico real + repositorio real + mock do protocolo: 101 linhas -> 100 itens e truncado.</summary>
+    /// <summary>Servico real + repositorio real + mock do protocolo: 0 = 404, 1 = 200, 2 = 500 (RS-23).</summary>
     [Theory]
     [InlineData(0, typeof(ResultadoConsulta.NaoEncontrado))]
     [InlineData(1, typeof(ResultadoConsulta.Sucesso))]
-    [InlineData(101, typeof(ResultadoConsulta.Sucesso))]
-    public async Task ServicoComRepositorioReal_Fluxo(int linhas, Type esperado)
+    [InlineData(2, null)]
+    public async Task ServicoComRepositorioReal_Fluxo(int linhas, Type? esperado)
     {
         var servidor = new ServidorPostgresFalso(_ => new RespostaFalsa.Linhas(Geometrias.Pontos(linhas).ToList()));
         await using var _s = servidor;
@@ -176,13 +166,13 @@ public class MapasRepositoryProtocoloTests
         var servico = new ConsultaGeometriasService(
             new MapasRepository(ds, new LoggerMemoria<MapasRepository>()), new OpcoesConsulta(), new LoggerMemoria<ConsultaGeometriasService>());
 
-        var resultado = await servico.ConsultarAsync("9", ColunaMapa.Metry, CancellationToken.None);
-
-        Assert.IsType(esperado, resultado);
-        if (resultado is ResultadoConsulta.Sucesso s)
+        if (esperado is null)
         {
-            Assert.Equal(Math.Min(linhas, 100), s.Resposta.Quantidade);
-            Assert.Equal(linhas > 100, s.Resposta.Truncado);
+            await Assert.ThrowsAsync<LeituraInconsistenteException>(() => servico.ConsultarAsync("9", ColunaMapa.Metry, CancellationToken.None));
+            return;
         }
+
+        var resultado = await servico.ConsultarAsync("9", ColunaMapa.Metry, CancellationToken.None);
+        Assert.IsType(esperado, resultado);
     }
 }
