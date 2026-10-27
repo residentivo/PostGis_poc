@@ -87,18 +87,23 @@ pipeline {
 
         stage('Publicar no ACR') {
             steps {
-                withCredentials([usernamePassword(credentialsId: 'acr-credenciais',
-                                                  usernameVariable: 'ACR_USUARIO',
-                                                  passwordVariable: 'ACR_SENHA')]) {
-                    sh '''
-                        echo "$ACR_SENHA" | docker login "$REGISTRO" -u "$ACR_USUARIO" --password-stdin
-                        docker push "$REGISTRO/api_mapas:$API_TAG"
-                        if docker manifest inspect "$REGISTRO/postgis_mapas:$POSTGIS_TAG" >/dev/null 2>&1; then
-                            echo "postgis_mapas:$POSTGIS_TAG ja existe no ACR; push pulado."
-                        else
-                            docker push "$REGISTRO/postgis_mapas:$POSTGIS_TAG"
-                        fi
-                    '''
+                script {
+                    try {
+                        withCredentials([usernamePassword(credentialsId: 'acr-credenciais',
+                                                          usernameVariable: 'ACR_USUARIO',
+                                                          passwordVariable: 'ACR_SENHA')]) {
+                            // Diagnostico passo a passo, com "como resolver" em cada falha.
+                            sh 'bash infraestrutura/jenkins/publicar_acr.sh'
+                        }
+                    } catch (e) {
+                        if (e.toString().contains('acr-credenciais')) {
+                            error("Credencial 'acr-credenciais' nao encontrada ou de tipo errado. Cadastre em " +
+                                  "Manage Jenkins > Credentials (escopo Global ou da pasta do job), tipo " +
+                                  "'Username with password': username = appId do service principal, " +
+                                  "password = senha mostrada pelo azure/provisionar.sh.")
+                        }
+                        throw e
+                    }
                 }
             }
         }

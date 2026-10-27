@@ -18,6 +18,7 @@ Jenkins ──build/push──▶ ACR (acrpostgispoc.azurecr.io)
 | Arquivo | Conteúdo |
 |---------|----------|
 | `Jenkinsfile` | Pipeline: versão → testes (cobertura ≥ 80%) → imagens → push no ACR → implantação (só `main`). |
+| `jenkins/publicar_acr.sh` | Estágio "Publicar no ACR": confere credencial, imagens, DNS, acesso HTTPS, login e push, e em cada falha mostra a causa provável e o comando para corrigir. |
 | `docker-compose.yml` | Pilha da VM: `postgis`, `nginx` e `api`. |
 | `.env.example` | Modelo do `/opt/api_mapas/.env` da VM (registro, tags, limites; sem segredos). |
 | `postgis/Dockerfile` | **PostgreSQL 17 + PostGIS 3.5** (`postgis/postgis:17-3.5`) com os scripts de `database/`. |
