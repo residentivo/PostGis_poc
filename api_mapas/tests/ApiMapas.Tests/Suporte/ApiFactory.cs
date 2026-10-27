@@ -40,6 +40,12 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         Environment.SetEnvironmentVariable("PG_PORT", "1");
         Environment.SetEnvironmentVariable("PG_SSLMODE", null);
 
+        // RA-5: HTTP_PORTS/HTTPS_PORTS do ambiente (ex.: imagens .NET definem 8080) impediriam a subida.
+        Environment.SetEnvironmentVariable("ASPNETCORE_HTTP_PORTS", null);
+        Environment.SetEnvironmentVariable("ASPNETCORE_HTTPS_PORTS", null);
+        Environment.SetEnvironmentVariable("DOTNET_HTTP_PORTS", null);
+        Environment.SetEnvironmentVariable("DOTNET_HTTPS_PORTS", null);
+
         // Escrita (PUT) desligada por padrao nos testes, independente do ambiente da maquina.
         Environment.SetEnvironmentVariable("PG_ESCRITA_USER", null);
         Environment.SetEnvironmentVariable("PG_ESCRITA_PASSWORD", null);

@@ -11,6 +11,9 @@
 # (docker-compose.yml), e o unico que publica portas.
 # =====================================================================
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+# A imagem sdk herda ASPNETCORE_HTTP_PORTS=8080 da aspnet; com ela a API
+# recusa subir (RA-5) e todos os testes com WebApplicationFactory falham.
+ENV ASPNETCORE_HTTP_PORTS=
 WORKDIR /src
 COPY api_mapas/ ./
 RUN dotnet restore ApiMapas.sln
