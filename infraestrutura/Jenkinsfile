@@ -7,7 +7,6 @@
 // Credenciais (azure/provisionar.sh mostra os valores):
 //   acr-credenciais  Username with password  service principal com AcrPush
 //   azure-vm-ssh     SSH Username with private key  azureuser da VM
-//
 // Estagios: Versao -> Testes (cobertura >= 80%) -> Imagens -> Publicar no
 // ACR -> Implantar (so na main) -> teste de fumaca (implantar.sh).
 // =====================================================================
