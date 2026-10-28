@@ -68,9 +68,15 @@ echo ">> 5/6 docker login"
 if ! saida=$(echo "$ACR_SENHA" | docker login "$REGISTRO" -u "$ACR_USUARIO" --password-stdin 2>&1); then
     echo "$saida"
     case $saida in
-        *unauthorized*|*401*|*"incorrect username or password"*)
+        *"authentication required"*)
+            falhar "o ACR nao aceitou o service principal neste registro ($ACR_NOME)." \
+                "Causa mais comum: o parametro ACR_NOME aponta para outro registro, diferente do criado pelo azure/provisionar.sh. Registros: az acr list -o table" \
+                "Ou o service principal nao tem papel neste registro. Veja os papeis: az role assignment list --assignee <appId> --all -o table" \
+                "Para dar o papel: az role assignment create --assignee <appId> --role AcrPush --scope \$(az acr show -n $ACR_NOME --query id -o tsv)   (vale em alguns minutos)" \
+                "Confira tambem se o username da credencial e o appId (GUID), nao o nome do service principal." ;;
+        *unauthorized*|*401*|*"incorrect username or password"*|*"Invalid client"*)
             falhar "usuario/senha recusados pelo ACR." \
-                "Confira se o username e o appId (nao o nome) do service principal: az ad sp list --display-name sp-jenkins-$ACR_NOME --query '[].appId' -o tsv" \
+                "Confira se o username e o appId (GUID) do service principal: az ad sp list --display-name <nome-do-sp> --query '[].appId' -o tsv" \
                 "A senha do service principal expira (padrao 1 ano). Gere outra e atualize a credencial no Jenkins:" \
                 "az ad sp credential reset --id <appId> --query password -o tsv" ;;
         *"Cannot connect to the Docker daemon"*|*"permission denied"*docker.sock*)

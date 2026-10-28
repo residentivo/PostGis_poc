@@ -29,7 +29,8 @@ pipeline {
     }
 
     environment {
-        REGISTRO = "${params.ACR_NOME}.azurecr.io"
+        // Nomes de ACR sao sempre minusculos.
+        REGISTRO = "${params.ACR_NOME.trim().toLowerCase()}.azurecr.io"
         DOCKER_BUILDKIT = '1'
         COMPOSE_DIR = '/opt/api_mapas'
     }
